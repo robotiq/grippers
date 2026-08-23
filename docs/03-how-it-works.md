@@ -7,6 +7,8 @@ the `GripperSync` cursor `Gripper::makeSync()` hands out: each `wait()`
 returns on a fresh status, and `status()` is that status — taken with the
 count that names it, so the loop acts on every snapshot exactly once,
 where `getStatus()` may already be a cycle ahead.
+[`sdk_cpp/examples/exchange_sync.cpp`](../sdk_cpp/examples/exchange_sync.cpp)
+is a complete example.
 
 > **Note:** the exchange thread's Modbus protocol layer is
 > [nanoMODBUS](https://github.com/debevv/nanoMODBUS) (vendored under
