@@ -21,6 +21,7 @@
 
 namespace Robotiq {
 class Serial;
+class GripperSync;
 
 namespace detail {
 class GripperState;
@@ -41,7 +42,9 @@ class GripperState;
 //! thread reads/writes the wire. Reads are whole snapshots and writes are
 //! whole commands — no per-field accessors, deliberately: every
 //! transmitted frame is a command the application composed, and two
-//! fields never come from different exchange cycles.
+//! fields never come from different exchange cycles. Waiting on the
+//! exchange cycle goes through the GripperSync cursor makeSync() hands
+//! out; the class itself never blocks.
 class Gripper
 {
 public:
@@ -94,8 +97,12 @@ public:
    //! \return A snapshot of the gripper's last received status block.
    [[nodiscard]] GripperStatus getStatus() const;
 
-   // TODO: add an exchange-cycle sync primitive so a caller's control loop
-   // can run in step with the background exchange without polling
+   //! \return Completed exchange cycles: one per successful transaction.
+   [[nodiscard]] uint64_t exchangeCount() const;
+
+   //! \return A cursor for a control loop to wait on, one per loop. Instant:
+   //!         the cursor blocks, never this.
+   [[nodiscard]] GripperSync makeSync() const;
 
    //! \return The current state of the background exchange; see ConnectionState.
    [[nodiscard]] ConnectionState connectionState() const;
@@ -109,8 +116,49 @@ public:
 
 private:
    // Hides the link, the exchange thread and the image; see
-   // src/gripper_state.hpp.
-   std::unique_ptr<detail::GripperState> _impl;
+   // src/gripper_state.hpp. Shared with the cursors makeSync() hands out, so
+   // one outliving this gripper is defined rather than dangling.
+   std::shared_ptr<detail::GripperState> _impl;
+};
+
+//! \ingroup core_api
+//! \brief A cursor for a control loop to wait on, once per iteration.
+//!
+//! One control loop's place in the exchange cycle, from
+//! Gripper::makeSync(). Each cursor holds its own position, so several can
+//! follow one gripper and each sees every cycle. Every wait() hands back the
+//! status it woke on through status(), taken with the count that names it,
+//! so a loop acts on each snapshot exactly once — Gripper::getStatus() may
+//! already be a cycle ahead by the time the loop reads it. The exchange
+//! cycle never blocks on a waiter, and a cursor may outlive its Gripper: it
+//! holds the state alive, and waits on a stopped cycle return at once.
+class GripperSync
+{
+public:
+   //! \brief Block until the next exchange cycle.
+   //! \param timeout How long to wait for the next exchange cycle.
+   //! \return true when a fresh status landed, now in status(); false when
+   //!         \p timeout elapsed with nothing arriving — a stalled bus — or
+   //!         the Gripper is gone.
+   [[nodiscard]] bool wait(std::chrono::milliseconds timeout);
+
+   //! \return The status the last successful wait() woke on, until the next
+   //!         one; the image at makeSync() before any.
+   [[nodiscard]] const GripperStatus& status() const noexcept { return _status; }
+
+   //! \return Cycles the last wait() went past without showing: zero while
+   //!         the loop keeps up, how far behind it fell when it does not. A
+   //!         slow loop resumes on the newest status; nothing is queued for it.
+   [[nodiscard]] uint64_t skipped() const noexcept { return _skipped; }
+
+private:
+   friend class Gripper;
+   explicit GripperSync(std::shared_ptr<detail::GripperState> state);
+
+   std::shared_ptr<detail::GripperState> _state;
+   uint64_t _count;
+   GripperStatus _status;
+   uint64_t _skipped = 0;
 };
 
 //! \ingroup activation
