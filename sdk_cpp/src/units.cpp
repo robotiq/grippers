@@ -29,34 +29,35 @@ std::optional<uint8_t> registerFromSpan(double value, double minimum, double ful
 
 std::optional<uint8_t> speedToRegister(double metresPerSecond, const DeviceProfile& profile)
 {
-   return registerFromSpan(metresPerSecond, profile.minSpeed, profile.fullScaleSpeed);
-}
-
-std::optional<uint8_t> forceToRegister(double newtons, const DeviceProfile& profile)
-{
-   return registerFromSpan(newtons, profile.minForce, profile.fullScaleForce);
+   return registerFromSpan(metresPerSecond, profile.minSpeed, profile.maxSpeed);
 }
 
 std::optional<uint8_t> openingToRegister(double openingMetres, const DeviceProfile& profile)
 {
-   if(!std::isfinite(openingMetres) || !std::isfinite(profile.stroke) || profile.stroke <= 0.0
-      || profile.registerBand() <= 0.0)
+   const double span = profile.maxOpening - profile.minOpening;
+   if(!std::isfinite(openingMetres) || !std::isfinite(span) || span <= 0.0 || profile.registerBand() <= 0.0)
    {
       return std::nullopt;
    }
-   const double closedFraction = 1.0 - std::clamp(openingMetres / profile.stroke, 0.0, 1.0);
-   return roundedRegister(profile.openRegister + closedFraction * profile.registerBand());
+   const double openFraction = std::clamp((openingMetres - profile.minOpening) / span, 0.0, 1.0);
+   return roundedRegister(profile.openPosition + (1.0 - openFraction) * profile.registerBand());
 }
 
 std::optional<double> openingFromRegister(uint8_t value, const DeviceProfile& profile)
 {
    const double band = profile.registerBand();
-   if(band <= 0.0 || !std::isfinite(profile.stroke) || profile.stroke <= 0.0)
+   const double span = profile.maxOpening - profile.minOpening;
+   if(band <= 0.0 || !std::isfinite(span) || span <= 0.0)
    {
       return std::nullopt;
    }
-   const double closedFraction = std::clamp((value - profile.openRegister) / band, 0.0, 1.0);
-   return (1.0 - closedFraction) * profile.stroke;
+   const double closedFraction = std::clamp((value - profile.openPosition) / band, 0.0, 1.0);
+   return profile.minOpening + (1.0 - closedFraction) * span;
+}
+
+std::optional<uint8_t> effortToRegister(double effort)
+{
+   return registerFromSpan(effort, 0.0, 1.0);
 }
 
 } // namespace Robotiq::units
