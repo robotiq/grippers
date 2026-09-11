@@ -1,4 +1,6 @@
-# check_doc_snippets.py
+# sdk_cpp/tools
+
+## check_doc_snippets.py
 
 Doxygen's `\snippet` keeps the header doc-comments' code examples in sync
 with real, compiled code — see `EXAMPLE_PATH` in `../Doxyfile` and
@@ -15,7 +17,7 @@ reference — worse, actually, since nothing compiles it to catch the drift.
 gives the header comments: it fails loudly on a mismatch instead of letting
 one drift in silently.
 
-## The convention
+### The convention
 
 A markdown code fence opts in with an HTML-comment marker directly above it:
 
@@ -57,7 +59,7 @@ pseudo-code), opt out explicitly instead of leaving it unmarked:
 ```
 ````
 
-## Running it locally
+### Running it locally
 
 From the repo root (paths are resolved relative to the current directory,
 same as CI):
@@ -104,7 +106,7 @@ Fix it by editing whichever side is wrong — the markdown fence or the
 tagged region in the `.cpp` file — so they read identically again, then
 rerun the command above to confirm.
 
-## Adding a new checked example
+### Adding a new checked example
 
 1. Bracket the relevant lines in a real, compiled file under
    `sdk_cpp/examples/` with a `//! [your-tag]` ... `//! [your-tag]` pair
@@ -114,7 +116,7 @@ rerun the command above to confirm.
    verbatim.
 3. Run the command above to confirm.
 
-## Elsewhere this same convention shows up
+### Elsewhere this same convention shows up
 
 - This repo's own CI: the `doc-snippets` job in
   `.github/workflows/ci.yml`.
@@ -127,3 +129,56 @@ rerun the command above to confirm.
   `docs/contribute.mdx` for the full story, including how another tool repo
   can adopt this same pattern (`templates/check_doc_snippets.py` there is
   the copy-pasteable starting point).
+
+## check_doc_groups.py
+
+The Doxyfile's `WARN_IF_UNDOCUMENTED = YES` + `WARN_AS_ERROR =
+FAIL_ON_WARNINGS` already fail the build for a symbol with no
+documentation at all. But a symbol can carry a perfectly good `\brief`
+and still have no `\ingroup` — doxygen stays silent about that, and the
+symbol is then invisible under Core API (or any group) in `groups.dox`'s
+navigation, even though it's technically "documented." This happened to
+`DeviceProfile`, the `units.hpp` conversions, and `to_string.hpp` at one
+point, and to a couple of free `operator==`/`operator!=` overloads that
+had gone unnoticed since.
+
+`check_doc_groups.py` cross-references Doxygen's own XML output
+(`GENERATE_XML` in `../Doxyfile`) to find any namespace-scope symbol
+that isn't a member of some `\defgroup`. Run it after `doxygen Doxyfile`,
+from `sdk_cpp/`:
+
+```sh
+doxygen Doxyfile
+python3 tools/check_doc_groups.py
+```
+
+A clean run looks like:
+
+```
+Every namespace-scope symbol is grouped.
+```
+
+On a gap, it lists every offending symbol and exits non-zero:
+
+```
+2 symbol(s) are documented but not organized into any \ingroup:
+  - Robotiq::operator!= (function)
+  - Robotiq::operator== (function)
+```
+
+Fix it by adding `\ingroup <group>` (see `groups.dox` for the existing
+groups) to the symbol's doc comment. If it's deliberately not part of
+the documented API surface, wrap it in `//! \cond DOXYGEN_EXCLUDE` /
+`//! \endcond` instead — that removes it from Doxygen's output entirely,
+so there's nothing left for this script (or the docs site) to flag. This
+only holds as long as nobody enables that section: if `ENABLED_SECTIONS`
+in the Doxyfile ever lists `DOXYGEN_EXCLUDE`, the `\cond` block reappears
+in the generated docs.
+**`EXCLUDE_SYMBOLS` in the Doxyfile does not do this**: it only drops a
+symbol out of group listings, but it still shows up as a fully
+documented namespace member, which is exactly the "ungrouped, no page"
+problem the site's own build flags — that's what happened with
+`units::kAmperesPerRegisterStep` before it was switched to `\cond`.
+
+This is what the `api-docs` CI job runs right after `doxygen Doxyfile`
+(`.github/workflows/ci.yml`).
