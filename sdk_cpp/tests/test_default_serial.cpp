@@ -2,11 +2,7 @@
 //
 // Licensed under the BSD-3-Clause license; see LICENSE for details.
 
-// Note: libserialport validates that a port is a real serial device, so
-// PTY-based loopback tests are not possible with this backend (verified:
-// sp_get_port_by_name rejects /dev/pts/* and symlinks to it). DefaultSerial's
-// wire behavior is validated on hardware via examples/move_gripper.
-
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -15,6 +11,18 @@
 #include <Robotiq/detail/default_serial.hpp>
 #include <Robotiq/gripper/logger.hpp>
 #include <Robotiq/gripper/serial_io_exception.hpp>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <poll.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <string>
+#include <thread>
+#include <vector>
+#endif
 
 namespace Robotiq::test {
 using detail::DefaultSerial;
@@ -29,7 +37,13 @@ DefaultSerial makeSerial(SerialConfig config = {})
 TEST(TestDefaultSerial, throws_when_port_does_not_exist)
 {
    SerialConfig config;
+   // Well-formed for the platform and absent on it: the point is the
+   // missing device, not what an OS makes of a foreign port name.
+#ifdef _WIN32
+   config.port = "COM255";
+#else
    config.port = "/dev/this_should_not_exist";
+#endif
    auto serial = makeSerial(config);
    EXPECT_THROW(serial.open(), SerialIOException);
    EXPECT_FALSE(serial.isOpen());
@@ -79,5 +93,197 @@ TEST(TestDeviceBasename, strips_the_directory_part)
    EXPECT_EQ(detail::deviceBasename("COM3"), "COM3");
    EXPECT_EQ(detail::deviceBasename(""), "");
 }
+
+#ifndef _WIN32
+using namespace std::chrono_literals;
+using ::testing::ElementsAre;
+using ::testing::IsEmpty;
+
+namespace {
+// A pseudo-terminal pair standing in for the gripper's serial link: the
+// slave is a real tty, so DefaultSerial drives it through the same
+// termios path as an FTDI adapter, and the master is the peer that
+// answers. Only reachable since the transport moved off libserialport,
+// which refused to open a pty at all.
+class PtyLoopback
+{
+public:
+   PtyLoopback()
+   {
+      _master = ::posix_openpt(O_RDWR | O_NOCTTY);
+      if(_master < 0 || ::grantpt(_master) != 0 || ::unlockpt(_master) != 0)
+      {
+         return;
+      }
+      const char* name = ::ptsname(_master);
+      if(name != nullptr)
+      {
+         _slavePath = name;
+      }
+   }
+
+   ~PtyLoopback()
+   {
+      if(_master >= 0)
+      {
+         ::close(_master);
+      }
+   }
+
+   PtyLoopback(const PtyLoopback&) = delete;
+   PtyLoopback& operator=(const PtyLoopback&) = delete;
+
+   [[nodiscard]] bool valid() const { return _master >= 0 && !_slavePath.empty(); }
+   [[nodiscard]] const std::string& slavePath() const { return _slavePath; }
+
+   // An open DefaultSerial on the slave end. The latency timer is off:
+   // the sysfs node it looks for belongs to USB adapters, not ptys.
+   [[nodiscard]] std::unique_ptr<DefaultSerial> openSerial() const
+   {
+      SerialConfig config;
+      config.port = _slavePath;
+      config.latencyTimerMs = 0;
+      auto serial = std::make_unique<DefaultSerial>(std::move(config), std::make_shared<NullLogger>());
+      serial->open();
+      return serial;
+   }
+
+   void send(const std::vector<uint8_t>& data) const
+   {
+      EXPECT_EQ(::write(_master, data.data(), data.size()), static_cast<ssize_t>(data.size()));
+   }
+
+   // Up to size bytes from the peer's end. The deadline is a guard
+   // against hanging a failing test, not a behaviour under test.
+   [[nodiscard]] std::vector<uint8_t> receive(size_t size) const
+   {
+      std::vector<uint8_t> data(size);
+      size_t received = 0;
+      const auto deadline = std::chrono::steady_clock::now() + 2s;
+      while(received < size && std::chrono::steady_clock::now() < deadline)
+      {
+         struct pollfd descriptor = {};
+         descriptor.fd = _master;
+         descriptor.events = POLLIN;
+         if(::poll(&descriptor, 1, 100) <= 0)
+         {
+            continue;
+         }
+         const ssize_t count = ::read(_master, data.data() + received, size - received);
+         if(count > 0)
+         {
+            received += static_cast<size_t>(count);
+         }
+         else if(count < 0 && errno != EAGAIN && errno != EINTR)
+         {
+            break;
+         }
+      }
+      data.resize(received);
+      return data;
+   }
+
+private:
+   int _master = -1;
+   std::string _slavePath;
+};
+
+class PtySerialTest : public ::testing::Test
+{
+protected:
+   void SetUp() override
+   {
+      if(!_pty.valid())
+      {
+         GTEST_SKIP() << "no pseudo-terminal available on this machine";
+      }
+   }
+
+   PtyLoopback _pty;
+};
+} // namespace
+
+TEST_F(PtySerialTest, open_close_and_reopen_a_real_tty)
+{
+   const auto serial = _pty.openSerial();
+   EXPECT_TRUE(serial->isOpen());
+
+   serial->close();
+   EXPECT_FALSE(serial->isOpen());
+
+   EXPECT_NO_THROW(serial->open());
+   EXPECT_TRUE(serial->isOpen());
+}
+
+TEST_F(PtySerialTest, opening_an_already_open_port_is_ignored)
+{
+   const auto serial = _pty.openSerial();
+   EXPECT_NO_THROW(serial->open());
+   EXPECT_TRUE(serial->isOpen());
+}
+
+TEST_F(PtySerialTest, write_reaches_the_peer)
+{
+   const auto serial = _pty.openSerial();
+   serial->write({0x09, 0x03, 0x07, 0xD0, 0x00, 0x03});
+
+   EXPECT_THAT(_pty.receive(6), ElementsAre(0x09, 0x03, 0x07, 0xD0, 0x00, 0x03));
+}
+
+TEST_F(PtySerialTest, read_waits_for_the_requested_bytes)
+{
+   const auto serial = _pty.openSerial();
+   _pty.send({0x09, 0x03, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00});
+
+   EXPECT_THAT(serial->read(8, 500ms), ElementsAre(0x09, 0x03, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00));
+}
+
+TEST_F(PtySerialTest, read_waits_for_bytes_that_have_not_arrived_yet)
+{
+   const auto serial = _pty.openSerial();
+
+   // The tail of each frame is sent only once the read is under way, so
+   // the read has to wait for it rather than settle for what was already
+   // buffered. Repeated because the behaviour under test is what happens
+   // at the moment the port runs dry mid-frame, and a single round could
+   // miss it by having the peer get there first.
+   for(int round = 0; round < 32; ++round)
+   {
+      _pty.send({0x09, 0x03});
+      std::thread tail([this] { _pty.send({0x06, 0x11}); });
+      const auto frame = serial->read(4, 2s);
+      tail.join();
+
+      ASSERT_THAT(frame, ElementsAre(0x09, 0x03, 0x06, 0x11));
+   }
+}
+
+TEST_F(PtySerialTest, a_zero_timeout_read_takes_only_what_is_buffered)
+{
+   const auto serial = _pty.openSerial();
+   _pty.send({0xAA, 0xBB, 0xCC});
+
+   // The pty delivers the whole chunk to the slave's queue at once, so
+   // this blocking byte also settles the two behind it.
+   ASSERT_THAT(serial->read(1, 500ms), ElementsAre(0xAA));
+
+   // Asks for far more than is buffered: it must return the rest
+   // instead of waiting for the full count.
+   EXPECT_THAT(serial->read(64, 0ms), ElementsAre(0xBB, 0xCC));
+   EXPECT_THAT(serial->read(64, 0ms), IsEmpty());
+}
+
+TEST_F(PtySerialTest, open_rejects_a_baud_rate_the_platform_has_no_constant_for)
+{
+   SerialConfig config;
+   config.port = _pty.slavePath();
+   config.baudrate = 12345;
+   config.latencyTimerMs = 0;
+   auto serial = makeSerial(config);
+
+   EXPECT_THROW(serial.open(), SerialIOException);
+   EXPECT_FALSE(serial.isOpen());
+}
+#endif
 
 } // namespace Robotiq::test

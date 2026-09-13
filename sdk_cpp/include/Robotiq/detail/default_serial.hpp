@@ -1,10 +1,11 @@
 // Copyright (c) 2023 PickNik, Inc.
-// Copyright (c) 2026 Robotiq, Inc. (libserialport rewrite)
+// Copyright (c) 2026 Robotiq, Inc.
 //
 // Licensed under the BSD-3-Clause license; see LICENSE for details.
 
-//! \brief Serial implementation backed by libserialport (cross-platform:
-//!        Linux, Windows, macOS).
+//! \brief Serial implementation backed by the operating system's own
+//!        serial API — termios on Linux and macOS, the Win32 comm API on
+//!        Windows.
 //! Configures 8N1 with no flow control — the wire format of the Robotiq
 //! gripper's Modbus RTU link. Link parameters are fixed at construction
 //! (SerialConfig).
@@ -23,13 +24,13 @@
 #include <Robotiq/gripper/serial.hpp>
 #include <Robotiq/gripper/serial_config.hpp>
 
-struct sp_port; // opaque port handle from libserialport
-
 namespace Robotiq {
 class Logger;
 } // namespace Robotiq
 
 namespace Robotiq::detail {
+class SerialPort;
+
 class DefaultSerial : public Serial
 {
 public:
@@ -57,7 +58,8 @@ private:
    // Best-effort sysfs write; returns false when it could not be applied.
    [[nodiscard]] bool applyLatencyTimer() const;
 
-   struct sp_port* _portHandle = nullptr;
+   // Null when closed; the OS handle lives inside it.
+   std::unique_ptr<SerialPort> _port;
    SerialConfig _config;
    std::shared_ptr<Logger> _logger;
 };
