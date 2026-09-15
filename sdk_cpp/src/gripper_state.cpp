@@ -88,9 +88,14 @@ void GripperState::initializeImage()
 void GripperState::exchangeOnce()
 {
    GripperCommand commandCopy;
+   uint64_t latchedSeq = 0;
    {
       const std::lock_guard<Mutex> lock(*_imageMutex);
       commandCopy = _command;
+      // Latched here, published on success below: the gap between the two is
+      // the whole wire transaction, which is why a completed cycle alone says
+      // nothing about whose block it carried.
+      latchedSeq = _commandSeq;
    }
 
    GripperStatus freshStatus;
@@ -113,6 +118,7 @@ void GripperState::exchangeOnce()
    {
       const std::lock_guard<Mutex> lock(*_imageMutex);
       _status = freshStatus;
+      _sentSeq = latchedSeq;
       ++_exchangeCount;
    }
    // Notified with the lock dropped: waiters registered under it, so
@@ -154,10 +160,11 @@ void GripperState::start()
    });
 }
 
-void GripperState::setCommand(const GripperCommand& command)
+uint64_t GripperState::setCommand(const GripperCommand& command)
 {
    const std::lock_guard<Mutex> lock(*_imageMutex);
    _command = command;
+   return ++_commandSeq;
 }
 
 GripperCommand GripperState::command() const
@@ -197,6 +204,16 @@ GripperState::Snapshot GripperState::sync(uint64_t count, std::chrono::steady_cl
       _imageRefreshed->waitUntil(*_imageMutex, deadline);
    }
    return {_exchangeCount, _status};
+}
+
+uint64_t GripperState::waitForCommand(uint64_t ticket, std::chrono::steady_clock::time_point deadline) const
+{
+   const std::lock_guard<Mutex> lock(*_imageMutex);
+   while(_sentSeq < ticket && _running.load() && std::chrono::steady_clock::now() < deadline)
+   {
+      _imageRefreshed->waitUntil(*_imageMutex, deadline);
+   }
+   return _sentSeq;
 }
 
 void GripperState::stop() noexcept

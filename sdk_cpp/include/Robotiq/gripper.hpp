@@ -11,6 +11,7 @@
 #include <Robotiq/detail/config.hpp>
 #include <Robotiq/gripper/platform.hpp>
 #include <Robotiq/gripper/activation_result.hpp>
+#include <Robotiq/gripper/command_delivery.hpp>
 #include <Robotiq/gripper/connection_config.hpp>
 #include <Robotiq/gripper/connection_state.hpp>
 #include <Robotiq/gripper/logger.hpp>
@@ -86,9 +87,16 @@ public:
    Gripper(const Gripper&) = delete;
    Gripper& operator=(const Gripper&) = delete;
 
-   //! \brief Send a new command block on the next exchange cycle.
+   //! \brief Hand a new command block to the exchange cycle.
+   //!
+   //! The block goes out on the next cycle to *start*, which is not always
+   //! the next to complete: a cycle already on the wire carries the previous
+   //! block. Waiting one cycle is therefore not proof of transmission — pass
+   //! the returned ticket to GripperSync::waitForCommand() for that.
    //! \param command The whole command block to transmit; see GripperCommand.
-   void setCommand(const GripperCommand& command);
+   //! \return A ticket naming this block, for GripperSync::waitForCommand().
+   //!         Not [[nodiscard]]: most callers never look.
+   uint64_t setCommand(const GripperCommand& command);
 
    //! \return The last command block passed to setCommand() — or the
    //!         gripper's own echoed state, before the first call.
@@ -150,6 +158,20 @@ public:
    //!         the loop keeps up, how far behind it fell when it does not. A
    //!         slow loop resumes on the newest status; nothing is queued for it.
    [[nodiscard]] uint64_t skipped() const noexcept { return _skipped; }
+
+   //! \brief Block until the command \p ticket names has been transmitted,
+   //!        or a later one has taken its place.
+   //!
+   //! The SDK holds one command image and the wire carries whatever it holds
+   //! when a cycle starts, so a block replaced before any cycle latched it is
+   //! never sent — reported as Superseded rather than silently as success.
+   //! \warning Ask about a ticket before the next setCommand(). Once a later
+   //!          block has itself been transmitted, the older ticket reads
+   //!          Superseded whether or not it went out first.
+   //! \param ticket The value setCommand() returned for the block in question.
+   //! \param timeout How long to wait for an exchange to carry it.
+   //! \return see CommandDelivery.
+   [[nodiscard]] CommandDelivery waitForCommand(uint64_t ticket, std::chrono::milliseconds timeout);
 
 private:
    friend class Gripper;

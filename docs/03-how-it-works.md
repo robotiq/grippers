@@ -10,6 +10,26 @@ where `getStatus()` may already be a cycle ahead.
 [`sdk_cpp/examples/exchange_sync.cpp`](../sdk_cpp/examples/exchange_sync.cpp)
 is a complete example.
 
+`setCommand()` hands its block to that cycle rather than to the wire, and
+returns a ticket naming it. The block goes out on the next cycle to
+*start*, which is not always the next one to complete: a cycle already on
+the wire carries the block latched before it began. Waiting one cycle is
+therefore not proof that a command was sent. Passing the ticket to
+`GripperSync::waitForCommand()` is — it returns `Transmitted` once an
+exchange the gripper acked carried that block.
+
+A block can also be replaced before any cycle latches it, if a second
+`setCommand()` lands first. That block is never sent, and
+`waitForCommand()` says so with `Superseded` rather than reporting
+success. Ask about a ticket before your next `setCommand()`: once a
+later block has itself been transmitted, the older ticket reads
+`Superseded` whether or not it went out first.
+
+This holds for one control thread writing commands, which is the
+concurrency model `Gripper` documents. The SDK keeps a single command
+image, so two threads calling `setCommand()` overwrite each other's blocks
+— the loser's command is never transmitted, and no ticket can change that.
+
 > **Note:** the exchange thread's Modbus protocol layer is
 > [nanoMODBUS](https://github.com/debevv/nanoMODBUS) (vendored under
 > `sdk_cpp/third_party/`, BSD-licensed); on a hosted build, its serial

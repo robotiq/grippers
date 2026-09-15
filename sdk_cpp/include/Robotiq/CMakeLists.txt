@@ -5,6 +5,7 @@ target_sources(grippers_objects PRIVATE
   gripper/fault_status.hpp
   gripper/wait.hpp
   gripper/activation_result.hpp
+  gripper/command_delivery.hpp
   gripper/connection_config.hpp
   gripper/connection_state.hpp
   gripper/driver_exception.hpp

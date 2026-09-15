@@ -58,12 +58,18 @@ public:
    };
    [[nodiscard]] Snapshot snapshot() const;
 
-   void setCommand(const GripperCommand& command);
+   // Returns the ticket naming this block; see Gripper::setCommand().
+   uint64_t setCommand(const GripperCommand& command);
    [[nodiscard]] GripperCommand command() const;
    [[nodiscard]] GripperStatus status() const;
 
    // Completed exchange cycles: one per successful transaction.
    [[nodiscard]] uint64_t exchangeCount() const;
+
+   // Block until a command at least as new as \p ticket has been acked, the
+   // cycle stops or \p deadline elapses, and return the ticket last put on
+   // the wire. GripperSync is the only caller.
+   [[nodiscard]] uint64_t waitForCommand(uint64_t ticket, std::chrono::steady_clock::time_point deadline) const;
 
    // Block until the count passes \p count, the cycle stops or \p deadline
    // elapses, and return the snapshot reached. GripperSync is the only caller.
@@ -90,6 +96,13 @@ private:
    // a waiter both as one snapshot. It also keeps a 64-bit counter off
    // targets with no native 8-byte atomic (see _consecutiveFailures below).
    uint64_t _exchangeCount = 0;
+   // Tickets, under the same lock and for the same reason: which block the
+   // wire carried has to be published with the status it answered.
+   // _commandSeq names the image's current block, _sentSeq the last one an
+   // exchange actually carried. Equal means the image has reached the
+   // gripper; apart means a block is still waiting for a cycle to start.
+   uint64_t _commandSeq = 0;
+   uint64_t _sentSeq = 0;
 
    std::atomic<ConnectionState> _connectionState{ConnectionState::Connecting};
    std::atomic<bool> _running{false};

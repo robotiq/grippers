@@ -6,9 +6,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -66,6 +68,73 @@ public:
    }
 
    std::atomic<bool> failing{false};
+};
+
+//! GripperSerial that can be stopped between a cycle's command snapshot and
+//! its wire write — the window the command ticket exists for. A held cycle
+//! has already latched its block, so anything set while it waits is too late
+//! for it.
+class GatedSerial : public fake::GripperSerial
+{
+public:
+   using fake::GripperSerial::GripperSerial;
+
+   void write(const std::vector<uint8_t>& data) override
+   {
+      {
+         std::unique_lock<std::mutex> lock(_mutex);
+         ++_arrived;
+         _arrivals.notify_all();
+         _permitted.wait(lock, [this] { return _permits > 0; });
+         --_permits;
+      }
+      GripperSerial::write(data);
+   }
+
+   //! Stop the next write, returning once it is actually waiting.
+   void holdNextWrite()
+   {
+      std::unique_lock<std::mutex> lock(_mutex);
+      _permits = 0;
+      waitForNextArrival(lock);
+   }
+
+   //! Let the held write through and catch the following one, so the caller
+   //! lands between two cycles with the first one finished. One step, because
+   //! releasing and re-holding separately could take the permit back before
+   //! the held write ever used it.
+   void stepOneWrite()
+   {
+      std::unique_lock<std::mutex> lock(_mutex);
+      _permits = 1;
+      _permitted.notify_all();
+      waitForNextArrival(lock);
+   }
+
+   void release()
+   {
+      {
+         const std::lock_guard<std::mutex> lock(_mutex);
+         _permits = kUnlimited;
+      }
+      _permitted.notify_all();
+   }
+
+private:
+   static constexpr int kUnlimited = 1 << 30;
+
+   void waitForNextArrival(std::unique_lock<std::mutex>& lock)
+   {
+      const uint64_t baseline = _arrived;
+      _arrivals.wait(lock, [&] { return _arrived > baseline; });
+   }
+
+   std::mutex _mutex;
+   std::condition_variable _arrivals;
+   std::condition_variable _permitted;
+   uint64_t _arrived = 0;
+   // Open to begin with: the constructor's initial read has to get through.
+   int _permits = kUnlimited;
 };
 
 //! GripperSerial whose replies are lost while dropReplies is set:
@@ -692,6 +761,98 @@ TEST(TestGripperSync, destroying_the_gripper_wakes_a_blocked_cursor_at_once)
    EXPECT_TRUE(
       Robotiq::waitFor([&] { return returned.load(); }, std::chrono::seconds(2), std::chrono::milliseconds(1)));
    controlLoop.join();
+}
+
+TEST(TestGripperSync, a_ticket_is_transmitted_once_a_cycle_carries_the_block)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   Gripper gripper(std::make_unique<fake::GripperSerial>(fakeServer.server),
+                   kSlave,
+                   kSyncPeriod,
+                   makeDefaultPlatform(),
+                   std::make_shared<NullLogger>());
+
+   auto cursor = gripper.makeSync();
+   GripperCommand command = gripper.getCommand();
+   command.positionRequest = 42;
+   const uint64_t ticket = gripper.setCommand(command);
+
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::seconds(2)), CommandDelivery::Transmitted);
+   // Transmitted means the gripper has it, not that it is on its way.
+   EXPECT_EQ(fakeServer.model.command().positionRequest, 42);
+}
+
+TEST(TestGripperSync, a_cycle_already_on_the_wire_does_not_carry_a_later_block)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<GatedSerial>(fakeServer.server);
+   GatedSerial& link = *serial;
+   Gripper gripper(std::move(serial), kSlave, kSyncPeriod, makeDefaultPlatform(), std::make_shared<NullLogger>());
+
+   // Stop a cycle after it latched its block and before it wrote.
+   link.holdNextWrite();
+   const uint64_t before = gripper.exchangeCount();
+
+   GripperCommand command = gripper.getCommand();
+   command.positionRequest = 42;
+   const uint64_t ticket = gripper.setCommand(command);
+
+   auto cursor = gripper.makeSync();
+
+   // Let that cycle finish, and catch the next one the same way.
+   link.stepOneWrite();
+   ASSERT_GT(gripper.exchangeCount(), before);
+
+   // A cycle completed, so a plain wait() would have returned here — but it
+   // carried the previous block, which is the whole reason a ticket exists.
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::milliseconds(30)), CommandDelivery::Timeout);
+   EXPECT_NE(fakeServer.model.command().positionRequest, 42);
+
+   link.release();
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::seconds(2)), CommandDelivery::Transmitted);
+   EXPECT_EQ(fakeServer.model.command().positionRequest, 42);
+}
+
+TEST(TestGripperSync, a_block_replaced_before_any_cycle_latched_it_reports_superseded)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<GatedSerial>(fakeServer.server);
+   GatedSerial& link = *serial;
+   Gripper gripper(std::move(serial), kSlave, kSyncPeriod, makeDefaultPlatform(), std::make_shared<NullLogger>());
+
+   // Both blocks land while no cycle can start, so only the second is ever
+   // latched: the first is overwritten in the image and never reaches the wire.
+   link.holdNextWrite();
+   GripperCommand command = gripper.getCommand();
+   command.positionRequest = 42;
+   const uint64_t replaced = gripper.setCommand(command);
+   command.positionRequest = 43;
+   const uint64_t kept = gripper.setCommand(command);
+   link.release();
+
+   auto cursor = gripper.makeSync();
+   ASSERT_EQ(cursor.waitForCommand(kept, std::chrono::seconds(2)), CommandDelivery::Transmitted);
+   EXPECT_EQ(cursor.waitForCommand(replaced, std::chrono::seconds(2)), CommandDelivery::Superseded);
+   EXPECT_EQ(fakeServer.model.command().positionRequest, 43);
+}
+
+TEST(TestGripperSync, a_stalled_bus_times_a_ticket_out_rather_than_reporting_it_sent)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<WriteFailingSerial>(fakeServer.server);
+   WriteFailingSerial& link = *serial;
+   Gripper gripper(std::move(serial), kSlave, kFastPeriod, makeDefaultPlatform(), std::make_shared<NullLogger>());
+
+   link.failing.store(true);
+   ASSERT_TRUE(Robotiq::waitFor([&] { return gripper.connectionState() == ConnectionState::Faulted; },
+                                std::chrono::seconds(2),
+                                std::chrono::milliseconds(1)));
+
+   // Nothing is acked while the link is down, so no ticket can be claimed
+   // sent — the caller learns the command did not go out.
+   const uint64_t ticket = gripper.setCommand(gripper.getCommand());
+   auto cursor = gripper.makeSync();
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::milliseconds(30)), CommandDelivery::Timeout);
 }
 
 TEST(TestGripperSync, a_stalled_bus_freezes_the_count_and_times_the_wait_out)

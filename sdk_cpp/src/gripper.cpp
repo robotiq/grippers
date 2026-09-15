@@ -54,9 +54,9 @@ Gripper::~Gripper()
    _impl->stop();
 }
 
-void Gripper::setCommand(const GripperCommand& command)
+uint64_t Gripper::setCommand(const GripperCommand& command)
 {
-   _impl->setCommand(command);
+   return _impl->setCommand(command);
 }
 
 GripperCommand Gripper::getCommand() const
@@ -100,6 +100,16 @@ bool GripperSync::wait(std::chrono::milliseconds timeout)
    _count = fresh.count;
    _status = fresh.status;
    return true;
+}
+
+CommandDelivery GripperSync::waitForCommand(uint64_t ticket, std::chrono::milliseconds timeout)
+{
+   const uint64_t sent = _state->waitForCommand(ticket, std::chrono::steady_clock::now() + timeout);
+   if(sent < ticket)
+   {
+      return CommandDelivery::Timeout;
+   }
+   return sent == ticket ? CommandDelivery::Transmitted : CommandDelivery::Superseded;
 }
 
 ConnectionState Gripper::connectionState() const

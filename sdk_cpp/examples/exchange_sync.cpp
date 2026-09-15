@@ -27,6 +27,7 @@
 using namespace std::chrono_literals;
 using Robotiq::ActionRequestBit;
 using Robotiq::ActivationResult;
+using Robotiq::CommandDelivery;
 using Robotiq::Gripper;
 using Robotiq::GripperCommand;
 using Robotiq::GripperStatus;
@@ -132,7 +133,9 @@ bool closeFastThenGently(Gripper& gripper, GripperCommand& command, Logger& logg
       if(cursor.skipped() > 0)
       {
          // Not fatal — that status is still the newest — but a loop that
-         // keeps skipping cannot hold the bus rate.
+         // keeps skipping cannot hold the bus rate. Expected once, right
+         // after the ease-off: waitForCommand() below sits out the cycles
+         // that carry it.
          logger.log(Logger::Level::Debug, "fell behind by " + std::to_string(cursor.skipped()) + " cycles");
       }
 
@@ -146,9 +149,17 @@ bool closeFastThenGently(Gripper& gripper, GripperCommand& command, Logger& logg
          // bench, at a ~110 ms dead stop.)
          command.speed = kMinSpeed;
          command.force = kMinForce;
-         gripper.setCommand(command);
+         const uint64_t ticket = gripper.setCommand(command);
          easedOff = true;
          logger.log(Logger::Level::Info, "at " + positionOf(status) + ": easing off for the last quarter");
+         // rSP and rFR have no echo, so the ticket is the only confirmation
+         // this one ever gets: a status cannot show it arrived.
+         const CommandDelivery delivery = cursor.waitForCommand(ticket, kCycleTimeout);
+         if(delivery != CommandDelivery::Transmitted)
+         {
+            logger.log(Logger::Level::Error, "the ease-off never went out: " + std::string(toString(delivery)));
+            return false;
+         }
          continue;
       }
 
