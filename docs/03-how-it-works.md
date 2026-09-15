@@ -228,7 +228,48 @@ Here is an example of what gets printed:
 gACT=1 gGTO=1 gSTA=Complete(0x3) gOBJ=AtRequestedPosition(0x3) gFLT=None(0x0) kFLT=None(0x0) gPR=100 gPO=100 gCU=0
 ```
 
+### Estimating velocity
 
+The status block reports where the fingers are, not how fast they are
+moving. A caller that needs a rate — to tell a finger still travelling
+from one stopped against an object, or to feed a controller that wants
+one — derives it from successive positions, and the difference between
+two of them on its own is unusable: `gPO` is one byte over the whole
+stroke, so at any exchange rate worth running most cycles report no
+change at all and the occasional count flip reads as a large spike.
+
+`Robotiq/gripper/velocity_estimator.hpp` filters that difference into a
+signal that settles on the real rate and cannot be crossed by a single
+count. It takes the positions in whatever unit the caller wants the rate
+in, and takes the clock from the caller, so it holds no opinion about
+either:
+
+<!-- snippet: snippets.cpp velocity-estimate -->
+```cpp
+double fingerSpeed(Robotiq::Gripper& gripper, Robotiq::VelocityEstimator& estimator)
+{
+   // One sample per pass of the caller's own loop. Sampling faster than the
+   // gripper exchanges costs nothing but the call.
+   uint8_t position = gripper.getStatus().position;
+   double opening = Robotiq::units::openingFromRegister(position, Robotiq::profiles::k2F85).value();
+   auto now = std::chrono::steady_clock::now().time_since_epoch();
+   return estimator.update(opening, std::chrono::duration_cast<std::chrono::nanoseconds>(now)); // m/s
+}
+```
+
+The estimator's one knob is its time constant, and it trades the two
+ways the estimate can mislead. A position step of one count bumps the
+estimate by one count divided by the time constant and decays from
+there, so a longer constant makes a spurious count smaller; after the
+fingers stop, the estimate falls by roughly a factor of three per time
+constant, so a shorter one notices the stop sooner. On a 2F-85, whose
+count is 0.37 mm and whose slowest commanded speed is 20 mm/s, 100 ms
+puts a single count at 3.7 mm/s.
+
+The estimate is a filtered derivative either way, so it lags the fingers
+by about a time constant and it is not the gripper's own answer to
+whether the fingers are moving. Where that question is what you mean,
+`gOBJ` answers it directly and immediately.
 
 ## Gripper-related functions
 

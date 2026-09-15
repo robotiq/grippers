@@ -15,6 +15,7 @@
 #include <Robotiq/gripper/fake/gripper_factory.hpp>
 #include <Robotiq/gripper/stderr_logger.hpp>
 #include <Robotiq/gripper/units.hpp>
+#include <Robotiq/gripper/velocity_estimator.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -288,6 +289,18 @@ Robotiq::ActivationResult recoverFromFaultOnly(Robotiq::Gripper& gripper)
    //! [recover-from-fault-only]
    return result;
 }
+
+//! [velocity-estimate]
+double fingerSpeed(Robotiq::Gripper& gripper, Robotiq::VelocityEstimator& estimator)
+{
+   // One sample per pass of the caller's own loop. Sampling faster than the
+   // gripper exchanges costs nothing but the call.
+   uint8_t position = gripper.getStatus().position;
+   double opening = Robotiq::units::openingFromRegister(position, Robotiq::profiles::k2F85).value();
+   auto now = std::chrono::steady_clock::now().time_since_epoch();
+   return estimator.update(opening, std::chrono::duration_cast<std::chrono::nanoseconds>(now)); // m/s
+}
+//! [velocity-estimate]
 
 void basicLoggerInjection(Robotiq::ConnectionConfig& config)
 {
