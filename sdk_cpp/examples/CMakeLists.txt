@@ -7,6 +7,9 @@ target_link_libraries(exchange_rate_probe PRIVATE grippers_sdk grippers_warnings
 add_executable(quick_start quick_start.cpp)
 target_link_libraries(quick_start PRIVATE grippers_sdk grippers_warnings)
 
+add_executable(exchange_sync exchange_sync.cpp)
+target_link_libraries(exchange_sync PRIVATE grippers_sdk grippers_warnings)
+
 # Backs the header \snippet examples that aren't already covered by
 # quick_start/move_gripper (see snippets.cpp). Compiled by every normal
 # build, so a broken doc example fails the build like any other code;

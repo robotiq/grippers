@@ -11,6 +11,7 @@
 #include <Robotiq/detail/config.hpp>
 #include <Robotiq/gripper/platform.hpp>
 #include <Robotiq/gripper/activation_result.hpp>
+#include <Robotiq/gripper/command_delivery.hpp>
 #include <Robotiq/gripper/connection_config.hpp>
 #include <Robotiq/gripper/connection_state.hpp>
 #include <Robotiq/gripper/logger.hpp>
@@ -21,6 +22,7 @@
 
 namespace Robotiq {
 class Serial;
+class GripperSync;
 
 namespace detail {
 class GripperState;
@@ -41,7 +43,9 @@ class GripperState;
 //! thread reads/writes the wire. Reads are whole snapshots and writes are
 //! whole commands — no per-field accessors, deliberately: every
 //! transmitted frame is a command the application composed, and two
-//! fields never come from different exchange cycles.
+//! fields never come from different exchange cycles. Waiting on the
+//! exchange cycle goes through the GripperSync cursor makeSync() hands
+//! out; the class itself never blocks.
 class Gripper
 {
 public:
@@ -83,9 +87,16 @@ public:
    Gripper(const Gripper&) = delete;
    Gripper& operator=(const Gripper&) = delete;
 
-   //! \brief Send a new command block on the next exchange cycle.
+   //! \brief Hand a new command block to the exchange cycle.
+   //!
+   //! The block goes out on the next cycle to *start*, which is not always
+   //! the next to complete: a cycle already on the wire carries the previous
+   //! block. Waiting one cycle is therefore not proof of transmission — pass
+   //! the returned ticket to GripperSync::waitForCommand() for that.
    //! \param command The whole command block to transmit; see GripperCommand.
-   void setCommand(const GripperCommand& command);
+   //! \return A ticket naming this block, for GripperSync::waitForCommand().
+   //!         Not [[nodiscard]]: most callers never look.
+   uint64_t setCommand(const GripperCommand& command);
 
    //! \return The last command block passed to setCommand() — or the
    //!         gripper's own echoed state, before the first call.
@@ -94,8 +105,12 @@ public:
    //! \return A snapshot of the gripper's last received status block.
    [[nodiscard]] GripperStatus getStatus() const;
 
-   // TODO: add an exchange-cycle sync primitive so a caller's control loop
-   // can run in step with the background exchange without polling
+   //! \return Completed exchange cycles: one per successful transaction.
+   [[nodiscard]] uint64_t exchangeCount() const;
+
+   //! \return A cursor for a control loop to wait on, one per loop. Instant:
+   //!         the cursor blocks, never this.
+   [[nodiscard]] GripperSync makeSync() const;
 
    //! \return The current state of the background exchange; see ConnectionState.
    [[nodiscard]] ConnectionState connectionState() const;
@@ -109,8 +124,63 @@ public:
 
 private:
    // Hides the link, the exchange thread and the image; see
-   // src/gripper_state.hpp.
-   std::unique_ptr<detail::GripperState> _impl;
+   // src/gripper_state.hpp. Shared with the cursors makeSync() hands out, so
+   // one outliving this gripper is defined rather than dangling.
+   std::shared_ptr<detail::GripperState> _impl;
+};
+
+//! \ingroup core_api
+//! \brief A cursor for a control loop to wait on, once per iteration.
+//!
+//! One control loop's place in the exchange cycle, from
+//! Gripper::makeSync(). Each cursor holds its own position, so several can
+//! follow one gripper and each sees every cycle. Every wait() hands back the
+//! status it woke on through status(), taken with the count that names it,
+//! so a loop acts on each snapshot exactly once — Gripper::getStatus() may
+//! already be a cycle ahead by the time the loop reads it. The exchange
+//! cycle never blocks on a waiter, and a cursor may outlive its Gripper: it
+//! holds the state alive, and waits on a stopped cycle return at once.
+class GripperSync
+{
+public:
+   //! \brief Block until the next exchange cycle.
+   //! \param timeout How long to wait for the next exchange cycle.
+   //! \return true when a fresh status landed, now in status(); false when
+   //!         \p timeout elapsed with nothing arriving — a stalled bus — or
+   //!         the Gripper is gone.
+   [[nodiscard]] bool wait(std::chrono::milliseconds timeout);
+
+   //! \return The status the last successful wait() woke on, until the next
+   //!         one; the image at makeSync() before any.
+   [[nodiscard]] const GripperStatus& status() const noexcept { return _status; }
+
+   //! \return Cycles the last wait() went past without showing: zero while
+   //!         the loop keeps up, how far behind it fell when it does not. A
+   //!         slow loop resumes on the newest status; nothing is queued for it.
+   [[nodiscard]] uint64_t skipped() const noexcept { return _skipped; }
+
+   //! \brief Block until the command \p ticket names has been transmitted,
+   //!        or a later one has taken its place.
+   //!
+   //! The SDK holds one command image and the wire carries whatever it holds
+   //! when a cycle starts, so a block replaced before any cycle latched it is
+   //! never sent — reported as Superseded rather than silently as success.
+   //! \warning Ask about a ticket before the next setCommand(). Once a later
+   //!          block has itself been transmitted, the older ticket reads
+   //!          Superseded whether or not it went out first.
+   //! \param ticket The value setCommand() returned for the block in question.
+   //! \param timeout How long to wait for an exchange to carry it.
+   //! \return see CommandDelivery.
+   [[nodiscard]] CommandDelivery waitForCommand(uint64_t ticket, std::chrono::milliseconds timeout);
+
+private:
+   friend class Gripper;
+   explicit GripperSync(std::shared_ptr<detail::GripperState> state);
+
+   std::shared_ptr<detail::GripperState> _state;
+   uint64_t _count;
+   GripperStatus _status;
+   uint64_t _skipped = 0;
 };
 
 //! \ingroup activation

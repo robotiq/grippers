@@ -56,6 +56,7 @@ TEST(TestToString, enum_names_are_usable_at_compile_time)
    static_assert(toString(ConnectionState::Faulted) == "Faulted");
    static_assert(toString(Logger::Level::Warn) == "Warn");
    static_assert(toString(ActivationResult::FaultLatched) == "FaultLatched");
+   static_assert(toString(CommandDelivery::Superseded) == "Superseded");
    static_assert(toString(FaultSeverity::Major) == "Major");
 }
 

@@ -6,9 +6,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,6 +38,9 @@ namespace mc = Robotiq::detail::modbus_constants;
 
 constexpr uint8_t kSlave = 0x09;
 constexpr std::chrono::milliseconds kFastPeriod{1};
+//! Slow enough that the next cycle is always still ahead when a wait
+//! starts, so what a sync test observes is a real wait.
+constexpr std::chrono::milliseconds kSyncPeriod{20};
 
 GripperCommand activateCommand()
 {
@@ -61,6 +68,73 @@ public:
    }
 
    std::atomic<bool> failing{false};
+};
+
+//! GripperSerial that can be stopped between a cycle's command snapshot and
+//! its wire write — the window the command ticket exists for. A held cycle
+//! has already latched its block, so anything set while it waits is too late
+//! for it.
+class GatedSerial : public fake::GripperSerial
+{
+public:
+   using fake::GripperSerial::GripperSerial;
+
+   void write(const std::vector<uint8_t>& data) override
+   {
+      {
+         std::unique_lock<std::mutex> lock(_mutex);
+         ++_arrived;
+         _arrivals.notify_all();
+         _permitted.wait(lock, [this] { return _permits > 0; });
+         --_permits;
+      }
+      GripperSerial::write(data);
+   }
+
+   //! Stop the next write, returning once it is actually waiting.
+   void holdNextWrite()
+   {
+      std::unique_lock<std::mutex> lock(_mutex);
+      _permits = 0;
+      waitForNextArrival(lock);
+   }
+
+   //! Let the held write through and catch the following one, so the caller
+   //! lands between two cycles with the first one finished. One step, because
+   //! releasing and re-holding separately could take the permit back before
+   //! the held write ever used it.
+   void stepOneWrite()
+   {
+      std::unique_lock<std::mutex> lock(_mutex);
+      _permits = 1;
+      _permitted.notify_all();
+      waitForNextArrival(lock);
+   }
+
+   void release()
+   {
+      {
+         const std::lock_guard<std::mutex> lock(_mutex);
+         _permits = kUnlimited;
+      }
+      _permitted.notify_all();
+   }
+
+private:
+   static constexpr int kUnlimited = 1 << 30;
+
+   void waitForNextArrival(std::unique_lock<std::mutex>& lock)
+   {
+      const uint64_t baseline = _arrived;
+      _arrivals.wait(lock, [&] { return _arrived > baseline; });
+   }
+
+   std::mutex _mutex;
+   std::condition_variable _arrivals;
+   std::condition_variable _permitted;
+   uint64_t _arrived = 0;
+   // Open to begin with: the constructor's initial read has to get through.
+   int _permits = kUnlimited;
 };
 
 //! GripperSerial whose replies are lost while dropReplies is set:
@@ -104,12 +178,38 @@ private:
    std::atomic<int>& _joins;
 };
 
+//! Condition variable that counts the waits it serves, on the way through
+//! to the real one.
+class WaitCountingConditionVariable : public ConditionVariable
+{
+public:
+   WaitCountingConditionVariable(std::unique_ptr<ConditionVariable> real, std::atomic<int>& waits)
+      : _real(std::move(real))
+      , _waits(waits)
+   {
+   }
+
+   void waitUntil(Mutex& mutex, std::chrono::steady_clock::time_point timePoint) override
+   {
+      ++_waits;
+      _real->waitUntil(mutex, timePoint);
+   }
+
+   void notifyAll() override { _real->notifyAll(); }
+
+private:
+   std::unique_ptr<ConditionVariable> _real;
+   std::atomic<int>& _waits;
+};
+
 //! Platform that delegates to the default std-backed one but counts
 //! what the gripper asks of it — the seam a real RTOS port implements.
 class InstrumentedPlatform : public Platform
 {
 public:
    std::atomic<int> mutexesCreated{0};
+   std::atomic<int> conditionVariablesCreated{0};
+   std::atomic<int> conditionWaits{0};
    std::atomic<int> threadsSpawned{0};
    std::atomic<int> threadsJoined{0};
    std::atomic<int> sleepUntils{0};
@@ -119,6 +219,14 @@ public:
    {
       ++mutexesCreated;
       return _real->makeMutex();
+   }
+
+   std::unique_ptr<ConditionVariable> makeConditionVariable() override
+   {
+      ++conditionVariablesCreated;
+      auto counting = std::make_unique<WaitCountingConditionVariable>(_real->makeConditionVariable(), conditionWaits);
+      _created.store(counting.get());
+      return counting;
    }
 
    std::unique_ptr<Thread> spawn(std::function<void()> fn) override
@@ -139,7 +247,18 @@ public:
       _real->sleepFor(duration);
    }
 
+   //! Notify the gripper's condition variable with nothing behind it — the
+   //! spurious wake every waiter has to be ready for.
+   void notifyWithNoNews()
+   {
+      if(ConditionVariable* const condition = _created.load())
+      {
+         condition->notifyAll();
+      }
+   }
+
 private:
+   std::atomic<ConditionVariable*> _created{nullptr};
    std::shared_ptr<Platform> _real = makeDefaultPlatform();
 };
 } // namespace
@@ -389,9 +508,11 @@ TEST(TestGripperPlatform, exchange_runs_entirely_on_the_injected_platform)
                       std::make_shared<NullLogger>());
       // The gripper runs on — and reports — the platform it was given.
       EXPECT_EQ(&gripper.platform(), platform.get());
-      // One exchange thread, one image lock — and nothing else.
+      // One exchange thread, one image lock, one condition variable to
+      // announce the image with — and nothing else.
       EXPECT_EQ(platform->threadsSpawned.load(), 1);
       EXPECT_EQ(platform->mutexesCreated.load(), 1);
+      EXPECT_EQ(platform->conditionVariablesCreated.load(), 1);
       // The loop paces every cycle through the platform's sleep.
       ASSERT_TRUE(Robotiq::waitFor([&] { return platform->sleepUntils.load() >= 3; },
                                    std::chrono::seconds(2),
@@ -421,6 +542,338 @@ TEST(TestGripperPlatform, activate_sleeps_on_the_grippers_own_platform)
 
    EXPECT_EQ(activate(gripper, std::chrono::milliseconds(30)), ActivationResult::Timeout);
    EXPECT_GT(platform->sleepFors.load(), 0);
+}
+
+TEST_F(TestGripper, a_cursor_hands_out_a_fresh_status_every_time)
+{
+   // What a control loop does: wait, act, wait again.
+   auto cursor = gripper.makeSync();
+   for(int cycle = 0; cycle < 5; ++cycle)
+   {
+      // Only that each wait lands a status this loop has not had. Whether
+      // it also kept up — skipped() == 0 — is the scheduler's business, not
+      // the SDK's; skipped() is asserted where it is made to happen, in
+      // a_control_loop_busy_acting_on_a_status_... below.
+      ASSERT_TRUE(cursor.wait(std::chrono::seconds(2))) << "cycle " << cycle << " never landed";
+   }
+}
+
+TEST(TestGripperSync, waits_on_the_platforms_condition_variable_only_when_it_has_to)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   const auto platform = std::make_shared<InstrumentedPlatform>();
+   Gripper gripper(std::make_unique<fake::GripperSerial>(fakeServer.server),
+                   kSlave,
+                   kSyncPeriod,
+                   platform,
+                   std::make_shared<NullLogger>());
+
+   auto cursor = gripper.makeSync();
+   ASSERT_TRUE(cursor.wait(std::chrono::seconds(2)));
+   EXPECT_GT(platform->conditionWaits.load(), 0);
+   // A native condition variable blocks; a wait never falls back to sleeping.
+   EXPECT_EQ(platform->sleepFors.load(), 0);
+
+   // A cycle that already landed costs no wait: let some pile up behind the
+   // cursor, then take one.
+   ASSERT_TRUE(Robotiq::waitFor([&] { return gripper.exchangeCount() > 3; },
+                                std::chrono::seconds(2),
+                                std::chrono::milliseconds(1)));
+   const int waitsSoFar = platform->conditionWaits.load();
+   EXPECT_TRUE(cursor.wait(std::chrono::seconds(2)));
+   EXPECT_EQ(platform->conditionWaits.load(), waitsSoFar);
+}
+
+TEST(TestGripperSync, a_wake_with_nothing_behind_it_is_re_checked_not_trusted)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   const auto platform = std::make_shared<InstrumentedPlatform>();
+   Gripper gripper(std::make_unique<fake::GripperSerial>(fakeServer.server),
+                   kSlave,
+                   kSyncPeriod,
+                   platform,
+                   std::make_shared<NullLogger>());
+
+   auto cursor = gripper.makeSync();
+   ASSERT_TRUE(cursor.wait(std::chrono::seconds(2))); // catch up to the cycle
+
+   // Notifications carrying no new status, which is what a spurious wake is
+   // and what the ThreadX emulation can produce from a leftover token. A
+   // wait that returns on one of these without looking at the count would
+   // hand back a status it never received.
+   std::atomic<bool> stop{false};
+   std::thread noise([&] {
+      while(!stop.load())
+      {
+         platform->notifyWithNoNews();
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+   });
+
+   const int waitsBefore = platform->conditionWaits.load();
+   EXPECT_TRUE(cursor.wait(std::chrono::seconds(2)));
+   // Woken many times for one cycle: each one was re-checked and resumed.
+   EXPECT_GT(platform->conditionWaits.load(), waitsBefore + 1);
+
+   stop.store(true);
+   noise.join();
+}
+
+TEST(TestGripperSync, a_control_loop_busy_acting_on_a_status_never_holds_the_exchange_cycle_up)
+{
+   // Why this is a wait and not a callback: a callback on the exchange
+   // thread — or a wait that handed back the image lock — would stall every
+   // cycle for as long as the application thinks.
+   InstrumentedFakeGripperServer fakeServer;
+   Gripper gripper(std::make_unique<fake::GripperSerial>(fakeServer.server),
+                   kSlave,
+                   kFastPeriod,
+                   makeDefaultPlatform(),
+                   std::make_shared<NullLogger>());
+
+   std::atomic<bool> busy{false};
+   std::atomic<bool> release{false};
+   std::atomic<uint64_t> skippedWhileBusy{0};
+   auto cursor = gripper.makeSync();
+   std::thread controlLoop([&] {
+      (void)cursor.wait(std::chrono::seconds(2));
+      // Stands in for arbitrarily slow application work on that status.
+      busy.store(true);
+      while(!release.load())
+      {
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      // Back from the "work": resumes on the newest status, reporting what
+      // went by.
+      (void)cursor.wait(std::chrono::seconds(2));
+      skippedWhileBusy.store(cursor.skipped());
+   });
+   // A failed assertion returns early; the loop must not outlive the
+   // Gripper it waits on.
+   struct Releaser
+   {
+      std::atomic<bool>& release;
+      std::thread& loop;
+
+      ~Releaser()
+      {
+         release.store(true);
+         if(loop.joinable())
+         {
+            loop.join();
+         }
+      }
+   } const releaser{release, controlLoop};
+
+   ASSERT_TRUE(Robotiq::waitFor([&] { return busy.load(); }, std::chrono::seconds(2), std::chrono::milliseconds(1)));
+
+   // That cycles keep completing is the assertion; how fast is not.
+   const uint64_t whenBusy = gripper.exchangeCount();
+   EXPECT_TRUE(Robotiq::waitFor([&] { return gripper.exchangeCount() >= whenBusy + 100; },
+                                std::chrono::seconds(2),
+                                std::chrono::milliseconds(1)));
+
+   // Nothing queued up for it either: it resumed on the newest status and
+   // counted what went by. Read after the join, which publishes the count.
+   release.store(true);
+   controlLoop.join();
+   // Half of what went by, to stay clear of where the cursor's baseline sat
+   // relative to whenBusy: the point is that they are counted, not the
+   // exact count.
+   EXPECT_GE(skippedWhileBusy.load(), 50u);
+}
+
+TEST(TestGripperSync, a_cursors_status_is_the_snapshot_its_wake_named)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   Gripper gripper(std::make_unique<fake::GripperSerial>(fakeServer.server),
+                   kSlave,
+                   kSyncPeriod,
+                   makeDefaultPlatform(),
+                   std::make_shared<NullLogger>());
+
+   // Activated first: the fake, like the gripper, only latches a fault
+   // while rACT is set.
+   ASSERT_EQ(activate(gripper, std::chrono::seconds(2)), ActivationResult::Activated);
+   auto cursor = gripper.makeSync();
+   ASSERT_TRUE(cursor.wait(std::chrono::seconds(2)));
+   ASSERT_EQ(cursor.status().faultStatus.gripperFault(), GripperFault::None);
+
+   // The gripper moves on and the image follows; the cursor's snapshot does
+   // not, so the loop that woke on it acts on what it was woken for.
+   fakeServer.model.setFault(GripperFault::Overcurrent);
+   ASSERT_TRUE(
+      Robotiq::waitFor([&] { return gripper.getStatus().faultStatus.gripperFault() == GripperFault::Overcurrent; },
+                       std::chrono::seconds(2),
+                       std::chrono::milliseconds(1)));
+   EXPECT_EQ(cursor.status().faultStatus.gripperFault(), GripperFault::None);
+
+   // The next wake is the one that carries it.
+   ASSERT_TRUE(cursor.wait(std::chrono::seconds(2)));
+   EXPECT_EQ(cursor.status().faultStatus.gripperFault(), GripperFault::Overcurrent);
+}
+
+TEST(TestGripperSync, a_cursor_outliving_its_gripper_returns_false_instead_of_dangling)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   std::optional<GripperSync> cursor;
+   {
+      Gripper gripper(std::make_unique<fake::GripperSerial>(fakeServer.server),
+                      kSlave,
+                      kFastPeriod,
+                      makeDefaultPlatform(),
+                      std::make_shared<NullLogger>());
+      cursor = gripper.makeSync();
+      ASSERT_TRUE(cursor->wait(std::chrono::seconds(2)));
+   }
+
+   // Defined rather than dangling: the state outlived the gripper. Returning
+   // false is also the proof that destruction stopped the cycle instead of
+   // leaving it running on that shared state.
+   EXPECT_FALSE(cursor->wait(std::chrono::seconds(2)));
+}
+
+TEST(TestGripperSync, destroying_the_gripper_wakes_a_blocked_cursor_at_once)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<WriteFailingSerial>(fakeServer.server);
+   WriteFailingSerial& link = *serial;
+   auto gripper = std::make_unique<Gripper>(std::move(serial),
+                                            kSlave,
+                                            kFastPeriod,
+                                            makeDefaultPlatform(),
+                                            std::make_shared<NullLogger>());
+   // Nothing will ever wake the cursor but the stop.
+   link.failing.store(true);
+   ASSERT_TRUE(Robotiq::waitFor([&] { return gripper->connectionState() == ConnectionState::Faulted; },
+                                std::chrono::seconds(2),
+                                std::chrono::milliseconds(1)));
+
+   auto cursor = gripper->makeSync();
+   std::atomic<bool> returned{false};
+   std::thread controlLoop([&] {
+      // Far longer than the test may take: only the stop can end this wait.
+      EXPECT_FALSE(cursor.wait(std::chrono::seconds(30)));
+      returned.store(true);
+   });
+
+   gripper.reset();
+   EXPECT_TRUE(
+      Robotiq::waitFor([&] { return returned.load(); }, std::chrono::seconds(2), std::chrono::milliseconds(1)));
+   controlLoop.join();
+}
+
+TEST(TestGripperSync, a_ticket_is_transmitted_once_a_cycle_carries_the_block)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   Gripper gripper(std::make_unique<fake::GripperSerial>(fakeServer.server),
+                   kSlave,
+                   kSyncPeriod,
+                   makeDefaultPlatform(),
+                   std::make_shared<NullLogger>());
+
+   auto cursor = gripper.makeSync();
+   GripperCommand command = gripper.getCommand();
+   command.positionRequest = 42;
+   const uint64_t ticket = gripper.setCommand(command);
+
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::seconds(2)), CommandDelivery::Transmitted);
+   // Transmitted means the gripper has it, not that it is on its way.
+   EXPECT_EQ(fakeServer.model.command().positionRequest, 42);
+}
+
+TEST(TestGripperSync, a_cycle_already_on_the_wire_does_not_carry_a_later_block)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<GatedSerial>(fakeServer.server);
+   GatedSerial& link = *serial;
+   Gripper gripper(std::move(serial), kSlave, kSyncPeriod, makeDefaultPlatform(), std::make_shared<NullLogger>());
+
+   // Stop a cycle after it latched its block and before it wrote.
+   link.holdNextWrite();
+   const uint64_t before = gripper.exchangeCount();
+
+   GripperCommand command = gripper.getCommand();
+   command.positionRequest = 42;
+   const uint64_t ticket = gripper.setCommand(command);
+
+   auto cursor = gripper.makeSync();
+
+   // Let that cycle finish, and catch the next one the same way.
+   link.stepOneWrite();
+   ASSERT_GT(gripper.exchangeCount(), before);
+
+   // A cycle completed, so a plain wait() would have returned here — but it
+   // carried the previous block, which is the whole reason a ticket exists.
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::milliseconds(30)), CommandDelivery::Timeout);
+   EXPECT_NE(fakeServer.model.command().positionRequest, 42);
+
+   link.release();
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::seconds(2)), CommandDelivery::Transmitted);
+   EXPECT_EQ(fakeServer.model.command().positionRequest, 42);
+}
+
+TEST(TestGripperSync, a_block_replaced_before_any_cycle_latched_it_reports_superseded)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<GatedSerial>(fakeServer.server);
+   GatedSerial& link = *serial;
+   Gripper gripper(std::move(serial), kSlave, kSyncPeriod, makeDefaultPlatform(), std::make_shared<NullLogger>());
+
+   // Both blocks land while no cycle can start, so only the second is ever
+   // latched: the first is overwritten in the image and never reaches the wire.
+   link.holdNextWrite();
+   GripperCommand command = gripper.getCommand();
+   command.positionRequest = 42;
+   const uint64_t replaced = gripper.setCommand(command);
+   command.positionRequest = 43;
+   const uint64_t kept = gripper.setCommand(command);
+   link.release();
+
+   auto cursor = gripper.makeSync();
+   ASSERT_EQ(cursor.waitForCommand(kept, std::chrono::seconds(2)), CommandDelivery::Transmitted);
+   EXPECT_EQ(cursor.waitForCommand(replaced, std::chrono::seconds(2)), CommandDelivery::Superseded);
+   EXPECT_EQ(fakeServer.model.command().positionRequest, 43);
+}
+
+TEST(TestGripperSync, a_stalled_bus_times_a_ticket_out_rather_than_reporting_it_sent)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<WriteFailingSerial>(fakeServer.server);
+   WriteFailingSerial& link = *serial;
+   Gripper gripper(std::move(serial), kSlave, kFastPeriod, makeDefaultPlatform(), std::make_shared<NullLogger>());
+
+   link.failing.store(true);
+   ASSERT_TRUE(Robotiq::waitFor([&] { return gripper.connectionState() == ConnectionState::Faulted; },
+                                std::chrono::seconds(2),
+                                std::chrono::milliseconds(1)));
+
+   // Nothing is acked while the link is down, so no ticket can be claimed
+   // sent — the caller learns the command did not go out.
+   const uint64_t ticket = gripper.setCommand(gripper.getCommand());
+   auto cursor = gripper.makeSync();
+   EXPECT_EQ(cursor.waitForCommand(ticket, std::chrono::milliseconds(30)), CommandDelivery::Timeout);
+}
+
+TEST(TestGripperSync, a_stalled_bus_freezes_the_count_and_times_the_wait_out)
+{
+   InstrumentedFakeGripperServer fakeServer;
+   auto serial = std::make_unique<WriteFailingSerial>(fakeServer.server);
+   WriteFailingSerial& link = *serial;
+   Gripper gripper(std::move(serial), kSlave, kFastPeriod, makeDefaultPlatform(), std::make_shared<NullLogger>());
+
+   link.failing.store(true);
+   ASSERT_TRUE(Robotiq::waitFor([&] { return gripper.connectionState() == ConnectionState::Faulted; },
+                                std::chrono::seconds(2),
+                                std::chrono::milliseconds(1)));
+
+   // No exchange can complete, so the count stands still and the wait
+   // returns it unchanged — a caller sees the stall here without waiting
+   // for connectionState() to degrade.
+   const uint64_t stalled = gripper.exchangeCount();
+   auto cursor = gripper.makeSync();
+   EXPECT_FALSE(cursor.wait(std::chrono::milliseconds(30)));
+   EXPECT_EQ(gripper.exchangeCount(), stalled);
 }
 
 TEST_F(TestGripper, commands_reach_the_gripper_and_status_returns)

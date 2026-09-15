@@ -13,6 +13,7 @@
 
 #include <Robotiq/gripper/activation_result.hpp>
 #include <Robotiq/gripper/command.hpp>
+#include <Robotiq/gripper/command_delivery.hpp>
 #include <Robotiq/gripper/connection_state.hpp>
 #include <Robotiq/gripper/fault_status.hpp>
 #include <Robotiq/gripper/logger.hpp>
@@ -53,6 +54,23 @@ namespace Robotiq {
    case ActivationResult::FaultLatched:
       return "FaultLatched";
    case ActivationResult::Timeout:
+      return "Timeout";
+   }
+   return "Unrecognized";
+}
+
+//! \ingroup core_api
+//! \param delivery Outcome of GripperSync::waitForCommand().
+//! \return A short name for \p delivery.
+[[nodiscard]] constexpr std::string_view toString(CommandDelivery delivery)
+{
+   switch(delivery)
+   {
+   case CommandDelivery::Transmitted:
+      return "Transmitted";
+   case CommandDelivery::Superseded:
+      return "Superseded";
+   case CommandDelivery::Timeout:
       return "Timeout";
    }
    return "Unrecognized";

@@ -2,6 +2,34 @@
 
 At the wire level, Robotiq grippers are controlled by writing commands to, and reading status from, their memory over Modbus RTU. With this SDK, though, you never issue Modbus RTU requests yourself: you call `setCommand()` and `getStatus()`, and the `Gripper` object handles the Modbus RTU exchange with the hardware in the background — a dedicated thread that continuously exchanges FC 0x17 Modbus (read&write) transactions with the gripper, up to ~250 Hz at 115200 baud. That thread is the only thing that directly communicates with the gripper; the C++ driver's design is built around maximizing that communication frequency.
 
+A control loop can be synchronized with the exchange cycle through
+the `GripperSync` cursor `Gripper::makeSync()` hands out: each `wait()`
+returns on a fresh status, and `status()` is that status — taken with the
+count that names it, so the loop acts on every snapshot exactly once,
+where `getStatus()` may already be a cycle ahead.
+[`sdk_cpp/examples/exchange_sync.cpp`](../sdk_cpp/examples/exchange_sync.cpp)
+is a complete example.
+
+`setCommand()` hands its block to that cycle rather than to the wire, and
+returns a ticket naming it. The block goes out on the next cycle to
+*start*, which is not always the next one to complete: a cycle already on
+the wire carries the block latched before it began. Waiting one cycle is
+therefore not proof that a command was sent. Passing the ticket to
+`GripperSync::waitForCommand()` is — it returns `Transmitted` once an
+exchange the gripper acked carried that block.
+
+A block can also be replaced before any cycle latches it, if a second
+`setCommand()` lands first. That block is never sent, and
+`waitForCommand()` says so with `Superseded` rather than reporting
+success. Ask about a ticket before your next `setCommand()`: once a
+later block has itself been transmitted, the older ticket reads
+`Superseded` whether or not it went out first.
+
+This holds for one control thread writing commands, which is the
+concurrency model `Gripper` documents. The SDK keeps a single command
+image, so two threads calling `setCommand()` overwrite each other's blocks
+— the loser's command is never transmitted, and no ticket can change that.
+
 > **Note:** the exchange thread's Modbus protocol layer is
 > [nanoMODBUS](https://github.com/debevv/nanoMODBUS) (vendored under
 > `sdk_cpp/third_party/`, BSD-licensed); on a hosted build, its serial

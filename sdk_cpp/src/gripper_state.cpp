@@ -5,6 +5,7 @@
 #include "gripper_state.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <mutex> // std::lock_guard — available even where std::mutex is not
 #include <string>
 #include <utility>
@@ -18,6 +19,17 @@ namespace {
 constexpr uint64_t kFaultThreshold = 3;
 //! Initial _status-read attempts before construction fails.
 constexpr uint64_t kInitialReadAttempts = 3;
+
+std::unique_ptr<ConditionVariable> checkedConditionVariable(Platform& platform)
+{
+   auto condition = platform.makeConditionVariable();
+   if(!condition)
+   {
+      throw DriverException("a Platform returned a null ConditionVariable — GripperSync has nothing to "
+                            "wait on");
+   }
+   return condition;
+}
 } // namespace
 
 GripperState::GripperState(std::unique_ptr<Serial> serial,
@@ -30,6 +42,7 @@ GripperState::GripperState(std::unique_ptr<Serial> serial,
    , _client(std::move(serial), slaveAddress, _logger)
    , _period(exchangePeriod)
    , _imageMutex(_platform->makeMutex())
+   , _imageRefreshed(checkedConditionVariable(*_platform))
 {
 }
 
@@ -75,9 +88,14 @@ void GripperState::initializeImage()
 void GripperState::exchangeOnce()
 {
    GripperCommand commandCopy;
+   uint64_t latchedSeq = 0;
    {
       const std::lock_guard<Mutex> lock(*_imageMutex);
       commandCopy = _command;
+      // Latched here, published on success below: the gap between the two is
+      // the whole wire transaction, which is why a completed cycle alone says
+      // nothing about whose block it carried.
+      latchedSeq = _commandSeq;
    }
 
    GripperStatus freshStatus;
@@ -100,7 +118,12 @@ void GripperState::exchangeOnce()
    {
       const std::lock_guard<Mutex> lock(*_imageMutex);
       _status = freshStatus;
+      _sentSeq = latchedSeq;
+      ++_exchangeCount;
    }
+   // Notified with the lock dropped: waiters registered under it, so
+   // none can miss this, and the cycle never queues behind one.
+   _imageRefreshed->notifyAll();
    _consecutiveFailures.store(0);
    if(_connectionState.exchange(ConnectionState::Operational) == ConnectionState::Faulted)
    {
@@ -137,10 +160,11 @@ void GripperState::start()
    });
 }
 
-void GripperState::setCommand(const GripperCommand& command)
+uint64_t GripperState::setCommand(const GripperCommand& command)
 {
    const std::lock_guard<Mutex> lock(*_imageMutex);
    _command = command;
+   return ++_commandSeq;
 }
 
 GripperCommand GripperState::command() const
@@ -155,9 +179,47 @@ GripperStatus GripperState::status() const
    return _status;
 }
 
+uint64_t GripperState::exchangeCount() const
+{
+   const std::lock_guard<Mutex> lock(*_imageMutex);
+   return _exchangeCount;
+}
+
+GripperState::Snapshot GripperState::snapshot() const
+{
+   const std::lock_guard<Mutex> lock(*_imageMutex);
+   return {_exchangeCount, _status};
+}
+
+GripperState::Snapshot GripperState::sync(uint64_t count, std::chrono::steady_clock::time_point deadline) const
+{
+   // Held across the loop but not across each wait: waitUntil() drops this
+   // lock while it blocks and takes it back before returning, so it never
+   // asks for a lock it already holds and the guard has it again by the time
+   // it unlocks.
+   const std::lock_guard<Mutex> lock(*_imageMutex);
+   // Checked before waiting at all: an already-passed count costs no latency.
+   while(_exchangeCount <= count && _running.load() && std::chrono::steady_clock::now() < deadline)
+   {
+      _imageRefreshed->waitUntil(*_imageMutex, deadline);
+   }
+   return {_exchangeCount, _status};
+}
+
+uint64_t GripperState::waitForCommand(uint64_t ticket, std::chrono::steady_clock::time_point deadline) const
+{
+   const std::lock_guard<Mutex> lock(*_imageMutex);
+   while(_sentSeq < ticket && _running.load() && std::chrono::steady_clock::now() < deadline)
+   {
+      _imageRefreshed->waitUntil(*_imageMutex, deadline);
+   }
+   return _sentSeq;
+}
+
 void GripperState::stop() noexcept
 {
    _running.store(false);
+   _imageRefreshed->notifyAll();
    if(_exchangeThread)
    {
       _exchangeThread->join();

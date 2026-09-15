@@ -6,6 +6,8 @@
 
 #include "gripper_state.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -18,9 +20,6 @@
 #include <Robotiq/gripper/serial.hpp>
 
 namespace Robotiq {
-namespace {
-} // namespace
-
 namespace {
 std::shared_ptr<Platform> checkedPlatform(std::shared_ptr<Platform> platform)
 {
@@ -37,7 +36,7 @@ Gripper::Gripper(std::unique_ptr<Serial> serial,
                  std::chrono::microseconds exchangePeriod,
                  std::shared_ptr<Platform> platform,
                  std::shared_ptr<Logger> logger)
-   : _impl(std::make_unique<detail::GripperState>(std::move(serial),
+   : _impl(std::make_shared<detail::GripperState>(std::move(serial),
                                                   slaveAddress,
                                                   exchangePeriod,
                                                   checkedPlatform(std::move(platform)),
@@ -47,11 +46,17 @@ Gripper::Gripper(std::unique_ptr<Serial> serial,
    _impl->start();
 }
 
-Gripper::~Gripper() = default;
-
-void Gripper::setCommand(const GripperCommand& command)
+Gripper::~Gripper()
 {
-   _impl->setCommand(command);
+   // Explicit, not left to the state's destructor: a GripperSync may still
+   // hold the state alive, and destroying the gripper has to free the bus
+   // regardless. Idempotent, so the state's own destructor stays correct.
+   _impl->stop();
+}
+
+uint64_t Gripper::setCommand(const GripperCommand& command)
+{
+   return _impl->setCommand(command);
 }
 
 GripperCommand Gripper::getCommand() const
@@ -62,6 +67,49 @@ GripperCommand Gripper::getCommand() const
 GripperStatus Gripper::getStatus() const
 {
    return _impl->status();
+}
+
+uint64_t Gripper::exchangeCount() const
+{
+   return _impl->exchangeCount();
+}
+
+GripperSync Gripper::makeSync() const
+{
+   return GripperSync(_impl);
+}
+
+GripperSync::GripperSync(std::shared_ptr<detail::GripperState> state)
+   : _state(std::move(state))
+{
+   const detail::GripperState::Snapshot start = _state->snapshot();
+   _count = start.count;
+   _status = start.status;
+}
+
+bool GripperSync::wait(std::chrono::milliseconds timeout)
+{
+   const detail::GripperState::Snapshot fresh = _state->sync(_count, std::chrono::steady_clock::now() + timeout);
+   if(fresh.count <= _count)
+   {
+      _skipped = 0;
+      return false;
+   }
+   // Everything past the one cycle this wait consumed went by unseen.
+   _skipped = fresh.count - _count - 1;
+   _count = fresh.count;
+   _status = fresh.status;
+   return true;
+}
+
+CommandDelivery GripperSync::waitForCommand(uint64_t ticket, std::chrono::milliseconds timeout)
+{
+   const uint64_t sent = _state->waitForCommand(ticket, std::chrono::steady_clock::now() + timeout);
+   if(sent < ticket)
+   {
+      return CommandDelivery::Timeout;
+   }
+   return sent == ticket ? CommandDelivery::Transmitted : CommandDelivery::Superseded;
 }
 
 ConnectionState Gripper::connectionState() const
