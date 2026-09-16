@@ -228,7 +228,34 @@ Here is an example of what gets printed:
 gACT=1 gGTO=1 gSTA=Complete(0x3) gOBJ=AtRequestedPosition(0x3) gFLT=None(0x0) kFLT=None(0x0) gPR=100 gPO=100 gCU=0
 ```
 
+### Estimating velocity
 
+The status block reports where the fingers are, not how fast they are
+moving, and the raw difference between two positions is unusable: `gPO`
+is one byte over the whole stroke, so most cycles report no change and
+the occasional count flip reads as a large spike.
+
+`Robotiq/gripper/velocity_estimator.hpp` low-pass filters that
+difference. Positions go in in whatever unit the rate is wanted in, and
+the clock comes from the caller:
+
+<!-- snippet: snippets.cpp velocity-estimate -->
+```cpp
+double fingerSpeed(Robotiq::Gripper& gripper, Robotiq::VelocityEstimator& estimator)
+{
+   uint8_t position = gripper.getStatus().position;
+   double opening = Robotiq::units::openingFromRegister(position, Robotiq::profiles::k2F85).value();
+   return estimator.update(opening, std::chrono::steady_clock::now().time_since_epoch()); // m/s
+}
+```
+
+The time constant trades two things: a one-count step bumps the estimate
+by about one count divided by the time constant, and after the fingers
+stop the estimate decays by a factor of e per time constant. On a 2F-85,
+whose count is 0.37 mm and whose slowest commanded speed is 20 mm/s,
+100 ms puts a single count at 3.7 mm/s, well clear of real motion. The
+estimate lags the fingers by about a time constant; where the question
+is only whether the fingers are moving, `gOBJ` answers it directly.
 
 ## Gripper-related functions
 
