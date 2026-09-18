@@ -6,6 +6,8 @@
 
 #include "gripper_state.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -18,9 +20,6 @@
 #include <Robotiq/gripper/serial.hpp>
 
 namespace Robotiq {
-namespace {
-} // namespace
-
 namespace {
 std::shared_ptr<Platform> checkedPlatform(std::shared_ptr<Platform> platform)
 {
