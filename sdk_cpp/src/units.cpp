@@ -14,49 +14,96 @@ uint8_t roundedRegister(double steps)
 {
    return static_cast<uint8_t>(std::lround(steps));
 }
-} // namespace
 
-std::optional<uint8_t> registerFromSpan(double value, double minimum, double maximum)
+//! Where a gPO reading sits in the closing travel: 0 at the open end of the
+//! band, 1 at the closed end. Nothing when the band is unusable; a reading off
+//! either end of it reads as that end.
+std::optional<double> closingRatio(uint8_t value, const DeviceProfile& profile)
 {
-   if(!std::isfinite(value) || value < 0.0 || !std::isfinite(minimum) || !std::isfinite(maximum) || maximum <= minimum)
+   if(!profile.position().isValid())
    {
       return std::nullopt;
    }
-   const double fraction = std::clamp((value - minimum) / (maximum - minimum), 0.0, 1.0);
-   return roundedRegister(fraction * 0xFF);
+   return std::clamp(profile.position().ratioAt(value), 0.0, 1.0);
+}
+
+//! The register \p ratio of the way along the closing travel.
+std::optional<uint8_t> registerAtClosingRatio(double ratio, const DeviceProfile& profile)
+{
+   if(!profile.position().isValid())
+   {
+      return std::nullopt;
+   }
+   return roundedRegister(profile.position().valueAt(std::clamp(ratio, 0.0, 1.0)));
+}
+} // namespace
+
+std::optional<uint8_t> registerFromSpan(double value, const Range<double>& span)
+{
+   if(!std::isfinite(value) || value < 0.0 || !span.isValid())
+   {
+      return std::nullopt;
+   }
+   return roundedRegister(std::clamp(span.ratioAt(value), 0.0, 1.0) * 0xFF);
+}
+
+std::optional<uint8_t> registerFromSpan(double value, double minimum, double maximum)
+{
+   return registerFromSpan(value, Range<double>{minimum, maximum});
 }
 
 std::optional<uint8_t> speedToRegister(double speed, const DeviceProfile& profile)
 {
-   return registerFromSpan(speed, profile.minSpeed, profile.maxSpeed);
+   return registerFromSpan(speed, profile.speed());
 }
 
 std::optional<uint8_t> openingToRegister(double opening, const DeviceProfile& profile)
 {
-   const double span = profile.openingRange();
-   if(!std::isfinite(opening) || !std::isfinite(span) || span <= 0.0 || profile.registerPositionRange() <= 0.0)
+   const Range<double> span = profile.opening();
+   if(!std::isfinite(opening) || !span.isValid())
    {
       return std::nullopt;
    }
-   const double openFraction = std::clamp((opening - profile.minOpening) / span, 0.0, 1.0);
-   return roundedRegister(profile.openPosition + (1.0 - openFraction) * profile.registerPositionRange());
+   // The opening shrinks as the register grows, so the two ratios are
+   // complements of one another.
+   return registerAtClosingRatio(1.0 - std::clamp(span.ratioAt(opening), 0.0, 1.0), profile);
 }
 
 std::optional<double> openingFromRegister(uint8_t value, const DeviceProfile& profile)
 {
-   const double band = profile.registerPositionRange();
-   const double span = profile.openingRange();
-   if(band <= 0.0 || !std::isfinite(span) || span <= 0.0)
+   const Range<double> span = profile.opening();
+   const std::optional<double> closing = closingRatio(value, profile);
+   if(!closing || !span.isValid())
    {
       return std::nullopt;
    }
-   const double closedFraction = std::clamp((value - profile.openPosition) / band, 0.0, 1.0);
-   return profile.minOpening + (1.0 - closedFraction) * span;
+   return span.valueAt(1.0 - *closing);
+}
+
+std::optional<uint8_t> knuckleAngleToRegister(double angle, const DeviceProfile& profile)
+{
+   const Range<double> sweep{0.0, profile.knuckleAngleRange()};
+   if(!std::isfinite(angle) || !sweep.isValid())
+   {
+      return std::nullopt;
+   }
+   return registerAtClosingRatio(std::clamp(sweep.ratioAt(angle), 0.0, 1.0), profile);
+}
+
+std::optional<double> knuckleAngleFromRegister(uint8_t value, const DeviceProfile& profile)
+{
+   const Range<double> sweep{0.0, profile.knuckleAngleRange()};
+   const std::optional<double> closing = closingRatio(value, profile);
+   if(!closing || !sweep.isValid())
+   {
+      return std::nullopt;
+   }
+   return sweep.valueAt(*closing);
 }
 
 std::optional<uint8_t> effortToRegister(double effort)
 {
-   return registerFromSpan(effort, 0.0, 1.0);
+   return registerFromSpan(effort, {0.0, 1.0});
 }
 
 } // namespace Robotiq::units

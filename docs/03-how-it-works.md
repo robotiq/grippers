@@ -121,12 +121,17 @@ The SDK offers the capability to set position and speed in SI units rather than
 encoded bits.
 
 It works with gripper profiles which gather gripper specifications and SI
-units conversion functions. The mappings are linear and approximate.
+units conversion functions. The mappings are linear and approximate. A
+profile gives each scaled quantity as a `Range` too (`speed()`, `opening()`,
+`position()`), holding the value at each end of the travel, so the conversions
+all reduce to a ratio along that range.
 
 Some gripper profiles are provided for convenience: `profiles::k2F85` and
-`profiles::kHandE`, each for the standard fingers. You may have to create your
-own profile if for example you are using custom fingers and the close and open
-position are different from the default profiles.
+`profiles::kHandE`, each for the standard fingers. With custom fingers the
+close and open positions differ from the shipped ones, so start from the
+profile closest to your gripper and override only what you measured — the
+speed range and the knuckle slope are specifications rather than measurements,
+and a profile written from scratch has nowhere to get them.
 
 Force is commanded as an effort between 0 (minimum) and 1 (maximum) rather
 than newtons.
@@ -151,7 +156,22 @@ command.force = units::effortToRegister(kEffort).value();
 command.positionRequest = units::openingToRegister(kOpening, k2F85).value();
 
 double openingMetres = units::openingFromRegister(gripper.getStatus().position, k2F85).value();
+double knuckleRadians = units::knuckleAngleFromRegister(gripper.getStatus().position, k2F85).value();
 ```
+
+`knuckleAngleFromRegister` and `knuckleAngleToRegister` map the same register
+band onto the rotation of the knuckle the fingers hang off, for callers that
+draw the gripper rather than command it. They run the opposite way round to the
+opening: the angle grows as the fingers close. A profile that leaves the sweep
+at zero — a slider, which has no knuckle — gets nothing from either direction
+rather than an invented angle.
+
+`knuckleAngleFromRegister` and `knuckleAngleToRegister` map the same register
+band onto the rotation of the knuckle the fingers hang off, for callers that
+draw the gripper rather than command it. They run the opposite way round to the
+opening, since the angle grows as the fingers close. A profile whose knuckle
+slope is zero — a slider, which has no knuckle — gets nothing from either
+direction rather than an invented angle.
 
 These conversions return `std::optional` and yield nothing for a quantity with
 no defensible register value, so `.value()` above is safe only because `k2F85`

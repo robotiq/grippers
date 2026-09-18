@@ -19,6 +19,7 @@ add_executable(grippers_tests
   instrumented_platform.hpp
   test_process_image.cpp
   test_typed_layers.cpp
+  test_range.cpp
   test_units.cpp
   test_to_string.cpp
   test_wait.cpp

@@ -136,8 +136,11 @@ double siUnitConversion(Robotiq::Gripper& gripper)
    command.positionRequest = units::openingToRegister(kOpening, k2F85).value();
 
    double openingMetres = units::openingFromRegister(gripper.getStatus().position, k2F85).value();
+   double knuckleRadians = units::knuckleAngleFromRegister(gripper.getStatus().position, k2F85).value();
    //! [si-unit-conversion]
    (void)command; // built to demonstrate the conversions above; never sent in this doc-only snippet
+   (void)knuckleRadians;
+   (void)knuckleRadians;
    return openingMetres;
 }
 

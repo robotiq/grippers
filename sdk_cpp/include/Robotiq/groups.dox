@@ -132,23 +132,24 @@
 //! the 2F speed scale as approximate, and a register value is a setpoint,
 //! not a measurement.
 //!
-//! Speed maps [minSpeed, maxSpeed] onto register values 0..255, because
-//! value 0 is the gripper's minimum, not zero. A value below minSpeed
-//! floors at register 0 and a value above maxSpeed saturates at 255. NaN,
+//! Speed maps the profile's speed range onto register values 0..255, because
+//! value 0 is the gripper's minimum, not zero. A value below its lower end
+//! floors at register 0 and a value above its upper end saturates at 255. NaN,
 //! infinity and a negative value yield nothing: no benign caller produces
 //! them.
 //!
-//! Opening maps [minOpening, maxOpening] onto the profile's register band
+//! Opening maps the profile's opening range onto its register band
 //! and clamps to those ends rather than rejecting, because position
 //! setpoints from interpolating controllers overshoot the ends by a hair
 //! and holding the previous command there would be the wrong outcome.
 //! Values round to nearest, so inside the band a position read back
 //! commands the same value. A closed gripper settles a few steps either
 //! side of closedPosition, so a reading there converts to an opening a
-//! touch off minOpening; values past the band read as the nearest end.
+//! touch off the closed end of the opening range; values past the band read
+//! as the nearest end.
 //!
 //! A profile the arithmetic cannot use (a non-positive position span or
-//! register band, or maxSpeed at or below minSpeed) yields nothing.
+//! register band, or an empty or inverted speed range) yields nothing.
 //!
 //! \warning The opening conversions (openingToRegister,
 //! openingFromRegister) are only valid while the gripper stays in
