@@ -21,6 +21,7 @@
 
 namespace Robotiq {
 class Serial;
+class GripperSync;
 
 namespace detail {
 class GripperState;
@@ -41,7 +42,9 @@ class GripperState;
 //! thread reads/writes the wire. Reads are whole snapshots and writes are
 //! whole commands — no per-field accessors, deliberately: every
 //! transmitted frame is a command the application composed, and two
-//! fields never come from different exchange cycles.
+//! fields never come from different exchange cycles. Waiting on the
+//! exchange cycle goes through a GripperSync object built over this
+//! gripper; the class itself never blocks.
 class Gripper
 {
 public:
@@ -94,9 +97,6 @@ public:
    //! \return A snapshot of the gripper's last received status block.
    [[nodiscard]] GripperStatus getStatus() const;
 
-   // TODO: add an exchange-cycle sync primitive so a caller's control loop
-   // can run in step with the background exchange without polling
-
    //! \return The current state of the background exchange; see ConnectionState.
    [[nodiscard]] ConnectionState connectionState() const;
 
@@ -108,6 +108,9 @@ public:
    [[nodiscard]] Platform& platform() const noexcept;
 
 private:
+   // A sync object is built from a Gripper — see gripper/sync.hpp.
+   friend class GripperSync;
+
    // Hides the link, the exchange thread and the image; see
    // src/gripper_state.hpp.
    std::unique_ptr<detail::GripperState> _impl;

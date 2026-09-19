@@ -30,7 +30,7 @@ GripperState::GripperState(std::unique_ptr<Serial> serial,
    , _platform(std::move(os))
    , _client(std::move(serial), slaveAddress, _logger)
    , _period(exchangePeriod)
-   , _image(*_platform)
+   , _image(std::make_shared<ProcessImage>(*_platform))
 {
 }
 
@@ -68,13 +68,13 @@ void GripperState::initializeImage()
    command.action.set(ActionRequestBit::Activate, fresh.gripperStatus.activated());
    command.action.set(ActionRequestBit::GoTo, fresh.gripperStatus.goToEnabled());
    command.positionRequest = fresh.positionRequestEcho;
-   _image.seed(fresh, std::chrono::steady_clock::now(), command);
+   _image->seed(fresh, std::chrono::steady_clock::now(), command);
    _connectionState.store(ConnectionState::Operational);
 }
 
 void GripperState::exchangeOnce()
 {
-   const GripperCommand commandCopy = _image.command();
+   const GripperCommand commandCopy = _image->command();
 
    GripperStatus freshStatus;
    std::chrono::steady_clock::time_point completedAt;
@@ -97,7 +97,7 @@ void GripperState::exchangeOnce()
       throw;
    }
 
-   _image.publish(freshStatus, completedAt);
+   _image->publish(freshStatus, completedAt);
    _consecutiveFailures.store(0);
    if(_connectionState.exchange(ConnectionState::Operational) == ConnectionState::Faulted)
    {
@@ -136,28 +136,23 @@ void GripperState::start()
 
 void GripperState::setCommand(const GripperCommand& command)
 {
-   _image.setCommand(command);
+   _image->setCommand(command);
 }
 
 GripperCommand GripperState::command() const
 {
-   return _image.command();
+   return _image->command();
 }
 
 GripperStatus GripperState::status() const
 {
-   return _image.status();
-}
-
-StampedStatus GripperState::stampedStatus() const
-{
-   return _image.stampedStatus();
+   return _image->status();
 }
 
 void GripperState::stop() noexcept
 {
    _running.store(false);
-   _image.wakeAll();
+   _image->close();
    if(_exchangeThread)
    {
       _exchangeThread->join();

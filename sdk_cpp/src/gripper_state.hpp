@@ -53,7 +53,8 @@ public:
    [[nodiscard]] GripperCommand command() const;
    [[nodiscard]] GripperStatus status() const;
 
-   [[nodiscard]] StampedStatus stampedStatus() const;
+   // Shared with GripperSync, which may outlive this state.
+   [[nodiscard]] std::shared_ptr<const ProcessImage> image() const noexcept { return _image; }
 
    [[nodiscard]] ConnectionState connectionState() const { return _connectionState.load(); }
    [[nodiscard]] Platform& platform() const noexcept { return *_platform; }
@@ -67,7 +68,7 @@ private:
    detail::Throttle _failureLogThrottle{std::chrono::milliseconds(1000)};
    std::chrono::microseconds _period;
 
-   ProcessImage _image;
+   std::shared_ptr<ProcessImage> _image;
 
    std::atomic<ConnectionState> _connectionState{ConnectionState::Connecting};
    std::atomic<bool> _running{false};

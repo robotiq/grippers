@@ -1,5 +1,6 @@
 target_sources(grippers_objects PRIVATE
   gripper.hpp
+  gripper/sync.hpp
   gripper/command.hpp
   gripper/status.hpp
   gripper/fault_status.hpp
