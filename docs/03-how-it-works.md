@@ -17,6 +17,14 @@ getStatus() ◄─────────│               │     FC 0x17 read
                       └───────────────┘                              └───────────────┘
 ```
 
+A control loop can be synchronized with the exchange cycle through
+a `GripperSync` object built over the gripper: each `wait()` returns on a
+fresh status, and `getStampedStatus()` is that status — carried with the
+count and the instant that name it, so the loop acts on every snapshot
+exactly once, where `getStatus()` may already be a cycle ahead.
+[`sdk_cpp/examples/exchange_sync.cpp`](../sdk_cpp/examples/exchange_sync.cpp)
+is a complete example.
+
 > **Note:**
 >
 > The exchange thread's Modbus protocol layer is
