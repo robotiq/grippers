@@ -229,6 +229,14 @@ void makeFakeGripperUsage()
    //! [make-fake-gripper]
 }
 
+//! [velocity-from-record]
+std::optional<double> openingRate(Robotiq::Gripper& gripper)
+{
+   const Robotiq::StampedExchange exchange = gripper.getMostRecentStampedExchange();
+   return Robotiq::units::openingRateFromRegister(exchange.velocity, Robotiq::profiles::k2F85); // m/s
+}
+//! [velocity-from-record]
+
 //! [wait-for-exchange]
 bool waitForMotionEndByHand(Robotiq::Gripper& gripper)
 {

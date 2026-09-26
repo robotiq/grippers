@@ -44,12 +44,14 @@ constexpr const char* kDefaultFile = "exchange_log.csv";
 constexpr const char* kMetadataColumns = "time_s,exchange_count";
 constexpr const char* kCommandColumns = "rACT,rGTO,rATR,rARD,rPR,rSP,rFR";
 constexpr const char* kStatusColumns = "gACT,gGTO,gSTA,gOBJ,gFLT,kFLT,gPR,gPO,gCU";
+constexpr const char* kEstimateColumns = "gPO_rate_counts_per_s";
 
 void writeHeader(std::ostream& csv)
 {
    csv << kMetadataColumns << ',' //
        << kCommandColumns << ',' //
-       << kStatusColumns << '\n';
+       << kStatusColumns << ',' //
+       << kEstimateColumns << '\n';
 }
 
 // The fields in kMetadataColumns order, the time relative to \p start.
@@ -93,7 +95,7 @@ void writeRow(std::ostream& csv, std::chrono::steady_clock::time_point start, co
    writeCommand(csv, exchange.command);
    csv << ',';
    writeStatus(csv, exchange.status);
-   csv << '\n';
+   csv << ',' << exchange.velocity << '\n';
 }
 
 class Recorder

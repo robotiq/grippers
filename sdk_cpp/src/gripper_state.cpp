@@ -68,7 +68,9 @@ void GripperState::initializeImage()
    command.action.set(ActionRequestBit::Activate, fresh.gripperStatus.activated());
    command.action.set(ActionRequestBit::GoTo, fresh.gripperStatus.goToEnabled());
    command.positionRequest = fresh.positionRequestEcho;
-   _image.seed(fresh, std::chrono::steady_clock::now(), command);
+   const auto now = std::chrono::steady_clock::now();
+   _velocity.update(fresh.position, now);
+   _image.seed(fresh, now, command);
    _connectionState.store(ConnectionState::Operational);
 }
 
@@ -101,7 +103,7 @@ void GripperState::exchangeOnce()
    // record wakes reads Operational.
    _consecutiveFailures.store(0);
    const bool recovered = _connectionState.exchange(ConnectionState::Operational) == ConnectionState::Faulted;
-   _image.publish(commandCopy, freshStatus, completedAt);
+   _image.publish(commandCopy, freshStatus, completedAt, _velocity.update(freshStatus.position, completedAt));
    if(recovered)
    {
       _logger->log(Logger::Level::Info, "link recovered; the process image is live again");

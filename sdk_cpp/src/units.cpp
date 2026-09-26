@@ -54,6 +54,17 @@ std::optional<double> openingFromRegister(uint8_t value, const DeviceProfile& pr
    return profile.minOpening + (1.0 - closedFraction) * span;
 }
 
+std::optional<double> openingRateFromRegister(double countsPerSecond, const DeviceProfile& profile)
+{
+   const double band = profile.registerPositionRange();
+   const double span = profile.openingRange();
+   if(!std::isfinite(countsPerSecond) || band <= 0.0 || !std::isfinite(span) || span <= 0.0)
+   {
+      return std::nullopt;
+   }
+   return -countsPerSecond * span / band;
+}
+
 std::optional<uint8_t> effortToRegister(double effort)
 {
    return registerFromSpan(effort, 0.0, 1.0);

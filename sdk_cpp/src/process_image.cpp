@@ -46,6 +46,7 @@ void ProcessImage::seed(const GripperStatus& status,
    _stamped.metadata.timestamp = at;
    _stamped.command = command;
    _stamped.status = status;
+   _stamped.velocity = 0.0;
    _command = command;
 }
 
@@ -75,7 +76,8 @@ StampedExchange ProcessImage::stampedExchange() const
 
 void ProcessImage::publish(const GripperCommand& command,
                            const GripperStatus& status,
-                           std::chrono::steady_clock::time_point completedAt)
+                           std::chrono::steady_clock::time_point completedAt,
+                           double velocity)
 {
    {
       const std::lock_guard<Mutex> lock(*_mutex);
@@ -83,6 +85,7 @@ void ProcessImage::publish(const GripperCommand& command,
       _stamped.metadata.timestamp = completedAt;
       _stamped.command = command;
       _stamped.status = status;
+      _stamped.velocity = velocity;
    }
    _statusRefreshed->notifyAll();
 }

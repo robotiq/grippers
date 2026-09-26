@@ -37,7 +37,8 @@ public:
    // Record the exchange that wrote \p command and read \p status back.
    void publish(const GripperCommand& command,
                 const GripperStatus& status,
-                std::chrono::steady_clock::time_point completedAt);
+                std::chrono::steady_clock::time_point completedAt,
+                double velocity = 0.0);
 
    StampedExchange sync(uint64_t count, std::chrono::steady_clock::time_point deadline) const;
 

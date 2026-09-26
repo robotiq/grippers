@@ -19,6 +19,7 @@
 #include <Robotiq/gripper/platform.hpp>
 #include <Robotiq/gripper/serial.hpp>
 #include <Robotiq/gripper/status.hpp>
+#include <Robotiq/gripper/velocity_estimator.hpp>
 #include <Robotiq/detail/throttle.hpp>
 #include <Robotiq/gripper/modbus_client.hpp>
 
@@ -71,6 +72,8 @@ private:
    std::chrono::microseconds _period;
 
    ProcessImage _image;
+   // Exchange thread only: fed each record's gPO in turn.
+   VelocityEstimator _velocity{kVelocityTimeConstant};
 
    std::atomic<ConnectionState> _connectionState{ConnectionState::Connecting};
    std::atomic<bool> _running{false};
