@@ -273,6 +273,30 @@ if(gOBJ == Robotiq::ObjectDetection::Moving)
 }
 ```
 
+### Velocity
+
+The status block reports where the fingers are, not how fast they move,
+and `gPO` is one byte over the whole stroke: a raw difference between two
+readings is zero on most cycles and a spike on the rest. The exchange
+cycle therefore runs a first-order low-pass filter (`VelocityEstimator`,
+time constant `kVelocityTimeConstant`) over `gPO` and publishes the result
+in every record as `StampedExchange::velocity`, in counts per second,
+positive while closing. It trails the fingers by about a time constant.
+It estimates speed, not state: whether the fingers stopped, and why, is
+`gOBJ`'s report.
+
+`openingRateFromRegister()` scales it to metres per second, positive while
+opening:
+
+<!-- snippet: snippets.cpp velocity-from-record -->
+```cpp
+std::optional<double> openingRate(Robotiq::Gripper& gripper)
+{
+   const Robotiq::StampedExchange exchange = gripper.getMostRecentStampedExchange();
+   return Robotiq::units::openingRateFromRegister(exchange.velocity, Robotiq::profiles::k2F85); // m/s
+}
+```
+
 ### Human-readable output
 
 The SDK includes a `toString()` function to translate command and status information in human-readable format.

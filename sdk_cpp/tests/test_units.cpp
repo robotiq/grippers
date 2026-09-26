@@ -164,6 +164,22 @@ TEST(TestOpeningFromRegister, inside_the_band_a_position_read_back_commands_the_
    }
 }
 
+TEST(TestOpeningRateFromRegister, closing_at_one_band_per_second_reads_as_the_span_opening_negatively)
+{
+   const std::optional<double> rate = openingRateFromRegister(profiles::k2F85.registerPositionRange(), profiles::k2F85);
+   ASSERT_TRUE(rate.has_value());
+   EXPECT_DOUBLE_EQ(*rate, -profiles::k2F85.openingRange());
+   EXPECT_DOUBLE_EQ(openingRateFromRegister(0.0, profiles::k2F85).value(), 0.0);
+}
+
+TEST(TestOpeningRateFromRegister, rejects_what_has_no_opening_rate)
+{
+   EXPECT_FALSE(openingRateFromRegister(kNaN, profiles::k2F85).has_value());
+   DeviceProfile flat = profiles::k2F85;
+   flat.closedPosition = flat.openPosition;
+   EXPECT_FALSE(openingRateFromRegister(10.0, flat).has_value());
+}
+
 TEST(TestEffortToRegister, the_unit_span_maps_onto_the_whole_byte)
 {
    EXPECT_EQ(effortToRegister(0.0), 0);

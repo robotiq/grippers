@@ -20,6 +20,7 @@ add_executable(grippers_tests
   test_process_image.cpp
   test_typed_layers.cpp
   test_units.cpp
+  test_velocity_estimator.cpp
   test_to_string.cpp
   test_wait.cpp
   test_frequency.cpp

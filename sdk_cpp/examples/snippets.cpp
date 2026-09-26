@@ -239,6 +239,14 @@ bool waitWithPlatform(Robotiq::Gripper& gripper, uint8_t target)
 }
 //! [wait-with-platform]
 
+//! [velocity-from-record]
+std::optional<double> openingRate(Robotiq::Gripper& gripper)
+{
+   const Robotiq::StampedExchange exchange = gripper.getMostRecentStampedExchange();
+   return Robotiq::units::openingRateFromRegister(exchange.velocity, Robotiq::profiles::k2F85); // m/s
+}
+//! [velocity-from-record]
+
 //! [wait-for-exchange]
 bool waitForMotionEnd(Robotiq::Gripper& gripper)
 {

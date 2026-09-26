@@ -29,6 +29,10 @@ struct StampedExchange
    ExchangeMetadata metadata; //!< What names the exchange: count and instant.
    GripperCommand command; //!< The command block the exchange wrote.
    GripperStatus status; //!< The status block it read back.
+   //! Filtered rate of gPO, in counts per second, positive while closing;
+   //! a VelocityEstimator with kVelocityTimeConstant run over every
+   //! exchange. Zero on the seed record.
+   double velocity = 0.0;
 };
 
 } // namespace Robotiq

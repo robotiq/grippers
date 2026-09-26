@@ -68,7 +68,9 @@ void GripperState::initializeImage()
    command.action.set(ActionRequestBit::Activate, fresh.gripperStatus.activated());
    command.action.set(ActionRequestBit::GoTo, fresh.gripperStatus.goToEnabled());
    command.positionRequest = fresh.positionRequestEcho;
-   _image.seed(fresh, std::chrono::steady_clock::now(), command);
+   const auto now = std::chrono::steady_clock::now();
+   _velocity.update(fresh.position, now);
+   _image.seed(fresh, now, command);
    _connectionState.store(ConnectionState::Operational);
 }
 
@@ -97,7 +99,7 @@ void GripperState::exchangeOnce()
       throw;
    }
 
-   _image.publish(commandCopy, freshStatus, completedAt);
+   _image.publish(commandCopy, freshStatus, completedAt, _velocity.update(freshStatus.position, completedAt));
    _consecutiveFailures.store(0);
    if(_connectionState.exchange(ConnectionState::Operational) == ConnectionState::Faulted)
    {

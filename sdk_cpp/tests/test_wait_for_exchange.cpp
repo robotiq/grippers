@@ -184,6 +184,50 @@ TEST_F(TestWaitForExchange, wait_for_hands_the_predicate_each_exchange_once)
    EXPECT_EQ(fifth->metadata.exchangeCount, *previous);
 }
 
+TEST_F(TestWaitForExchange, the_seed_record_carries_no_velocity)
+{
+   EXPECT_DOUBLE_EQ(gripper.getMostRecentStampedExchange().velocity, 0.0);
+}
+
+TEST_F(TestWaitForExchange, a_record_carries_the_rate_of_the_position_it_read)
+{
+   ASSERT_EQ(activate(gripper, kWait), ActivationResult::Activated);
+   GripperCommand command = gripper.getCommand();
+   command.positionRequest = 200;
+   gripper.setCommand(command);
+
+   // The fake's fingers arrive in one exchange, so the record that first
+   // reads them there carries the whole step, closing.
+   std::optional<StampedExchange> arrived;
+   for(int wake = 0; wake < 10 && !(arrived && arrived->status.position == 200); ++wake)
+   {
+      arrived = gripper.waitForExchange(kWait);
+      ASSERT_TRUE(arrived.has_value());
+   }
+   ASSERT_EQ(arrived->status.position, 200);
+   EXPECT_GT(arrived->velocity, 0.0);
+
+   // Then decays, since gPO holds: well under the step a cycle later reads.
+   std::optional<StampedExchange> later;
+   for(int wake = 0; wake < 50; ++wake)
+   {
+      later = gripper.waitForExchange(kWait);
+      ASSERT_TRUE(later.has_value());
+   }
+   EXPECT_LT(later->velocity, 0.05 * arrived->velocity);
+
+   command.positionRequest = 100;
+   gripper.setCommand(command);
+   std::optional<StampedExchange> opened;
+   for(int wake = 0; wake < 10 && !(opened && opened->status.position == 100); ++wake)
+   {
+      opened = gripper.waitForExchange(kWait);
+      ASSERT_TRUE(opened.has_value());
+   }
+   ASSERT_EQ(opened->status.position, 100);
+   EXPECT_LT(opened->velocity, 0.0);
+}
+
 TEST_F(TestWaitForExchange, the_largest_timeout_waits_for_the_cycle_instead_of_expiring_at_once)
 {
    EXPECT_TRUE(gripper.waitForExchange(std::chrono::milliseconds::max()).has_value());

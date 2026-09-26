@@ -72,6 +72,17 @@ inline constexpr double kAmperesPerRegisterStep = 0.010;
 [[nodiscard]] std::optional<double> openingFromRegister(uint8_t value, const DeviceProfile& profile);
 
 //! \ingroup units
+//! gPO rate in counts/s -> opening rate in m/s.
+//! \param countsPerSecond The rate of gPO, as StampedExchange::velocity
+//!        reports it: positive while closing.
+//! \param profile The device profile to scale against.
+//! \return The opening rate in metres per second, positive while opening,
+//!         or std::nullopt if \p countsPerSecond is non-finite or
+//!         \p profile is one the arithmetic can't use (non-positive
+//!         position span or register band).
+[[nodiscard]] std::optional<double> openingRateFromRegister(double countsPerSecond, const DeviceProfile& profile);
+
+//! \ingroup units
 //! Effort in [0, 1] -> rFR. 0 is the gripper's minimum force, 1 its
 //! maximum; a value above 1 saturates at register 255.
 //! \param effort Requested gripping effort, as a fraction of the
