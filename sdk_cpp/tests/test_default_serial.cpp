@@ -19,6 +19,8 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -86,15 +88,56 @@ TEST(TestDefaultSerial, construction_config_round_trip)
    EXPECT_EQ(serial.getTimeout(), std::chrono::milliseconds{200});
 }
 
-TEST(TestDeviceBasename, strips_the_directory_part)
+#ifndef _WIN32
+class LatencyTimerPath : public ::testing::Test
 {
-   EXPECT_EQ(detail::deviceBasename("/dev/ttyUSB0"), "ttyUSB0");
-   EXPECT_EQ(detail::deviceBasename("/dev/serial/by-id/usb-FTDI_X-if00-port0"), "usb-FTDI_X-if00-port0");
-   EXPECT_EQ(detail::deviceBasename("COM3"), "COM3");
-   EXPECT_EQ(detail::deviceBasename(""), "");
+protected:
+   void SetUp() override
+   {
+      std::string base = ::testing::TempDir() + "latency_timer_XXXXXX";
+      ASSERT_NE(::mkdtemp(base.data()), nullptr);
+      _root = base;
+      std::filesystem::create_directories(_root / "dev");
+      std::filesystem::create_directories(_root / "sysfs/ttyUSB7");
+      std::ofstream(_root / "dev/ttyUSB7").put('\0');
+      std::ofstream(_root / "dev/ttyACM0").put('\0');
+      std::ofstream(_root / "sysfs/ttyUSB7/latency_timer") << 16;
+   }
+
+   void TearDown() override { std::filesystem::remove_all(_root); }
+
+   [[nodiscard]] std::string lookup(const std::filesystem::path& port) const
+   {
+      return detail::latencyTimerPath(port.string(), (_root / "sysfs").string());
+   }
+
+   std::filesystem::path _root;
+};
+
+TEST_F(LatencyTimerPath, FindsTheAttributeOfAnFtdiNode)
+{
+   EXPECT_EQ(lookup(_root / "dev/ttyUSB7"), (_root / "sysfs/ttyUSB7/latency_timer").string());
 }
 
-#ifndef _WIN32
+TEST_F(LatencyTimerPath, FollowsSymlinksToTheDeviceNode)
+{
+   std::filesystem::create_directories(_root / "dev/serial/by-id");
+   std::filesystem::create_symlink(_root / "dev/ttyUSB7", _root / "dev/serial/by-id/usb-FTDI_X-if00-port0");
+
+   EXPECT_EQ(lookup(_root / "dev/serial/by-id/usb-FTDI_X-if00-port0"),
+             (_root / "sysfs/ttyUSB7/latency_timer").string());
+}
+
+TEST_F(LatencyTimerPath, IsEmptyForANodeWithoutTheAttribute)
+{
+   EXPECT_EQ(lookup(_root / "dev/ttyACM0"), "");
+}
+
+TEST_F(LatencyTimerPath, IsEmptyForAMissingPort)
+{
+   EXPECT_EQ(lookup(_root / "dev/ttyUSB9"), "");
+}
+
 using namespace std::chrono_literals;
 using ::testing::ElementsAre;
 using ::testing::IsEmpty;
@@ -135,13 +178,11 @@ public:
    [[nodiscard]] bool valid() const { return _master >= 0 && !_slavePath.empty(); }
    [[nodiscard]] const std::string& slavePath() const { return _slavePath; }
 
-   // An open DefaultSerial on the slave end. The latency timer is off:
-   // the sysfs node it looks for belongs to USB adapters, not ptys.
+   // An open DefaultSerial on the slave end.
    [[nodiscard]] std::unique_ptr<DefaultSerial> openSerial() const
    {
       SerialConfig config;
       config.port = _slavePath;
-      config.latencyTimerMs = 0;
       auto serial = std::make_unique<DefaultSerial>(std::move(config), std::make_shared<NullLogger>());
       serial->open();
       return serial;

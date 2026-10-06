@@ -5,8 +5,10 @@
 
 #include <Robotiq/detail/default_serial.hpp>
 
+#include <filesystem>
 #include <fstream>
 #include <memory>
+#include <system_error>
 #include <string>
 #include <utility>
 
@@ -18,10 +20,16 @@
 
 namespace Robotiq::detail {
 
-std::string deviceBasename(const std::string& port)
+std::string latencyTimerPath(const std::string& port, const std::string& sysfsDevices)
 {
-   const auto slash = port.find_last_of('/');
-   return slash == std::string::npos ? port : port.substr(slash + 1);
+   std::error_code error;
+   const std::filesystem::path device = std::filesystem::canonical(port, error);
+   if(error)
+   {
+      return {};
+   }
+   const std::filesystem::path attribute = std::filesystem::path(sysfsDevices) / device.filename() / "latency_timer";
+   return std::filesystem::exists(attribute, error) ? attribute.string() : std::string();
 }
 
 DefaultSerial::DefaultSerial(SerialConfig config, std::shared_ptr<Logger> logger)
@@ -57,9 +65,14 @@ void DefaultSerial::open()
    _port = std::move(port);
 
 #ifdef __linux__
-   if(_config.latencyTimerMs > 0)
+   const std::string timerPath = latencyTimerPath(_config.port);
+   if(_config.latencyTimerMs > 0 && timerPath.empty())
    {
-      if(applyLatencyTimer())
+      _logger->log(Logger::Level::Debug, _config.port + " is not an FTDI adapter; no latency_timer to set.");
+   }
+   else if(_config.latencyTimerMs > 0)
+   {
+      if(applyLatencyTimer(timerPath))
       {
          _logger->log(Logger::Level::Info,
                       "FTDI latency_timer set to " + std::to_string(_config.latencyTimerMs) + " ms on " + _config.port
@@ -135,16 +148,9 @@ const SerialConfig& DefaultSerial::getConfig() const
    return _config;
 }
 
-bool DefaultSerial::applyLatencyTimer() const
+bool DefaultSerial::applyLatencyTimer(const std::string& path) const
 {
 #ifdef __linux__
-   const std::string base = deviceBasename(_config.port);
-   if(base.empty())
-   {
-      return false;
-   }
-   const std::string path = "/sys/bus/usb-serial/devices/" + base + "/latency_timer";
-
    // Read-before-write: sysfs is root-owned, so an unprivileged caller can't
    // write to it. If a privileged init (udev rule, container entrypoint) has
    // already pinned the value, skip the write — otherwise we'd emit a
@@ -168,6 +174,7 @@ bool DefaultSerial::applyLatencyTimer() const
 #else
    // No sysfs on this platform; the FTDI latency timer is a driver setting
    // (e.g. Windows device manager). Nothing to enforce programmatically.
+   (void)path;
    return false;
 #endif
 }
