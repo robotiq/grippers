@@ -298,6 +298,20 @@ the jaws clear before starting it. The other examples are described in
 - Port naming: `/dev/ttyUSB0` on Linux, `COM3` on Windows,
   `/dev/tty.usbserial-XXXX` on macOS.
 
+### Gripper on a UR tool connector
+
+A gripper wired to a Universal Robots tool connector is reached over the network: the robot serves the tool's RS-485 on TCP port 54321, and `socat` turns it into a local serial port.
+
+1. On the robot, install the [RS485 URCap](https://github.com/UniversalRobots/Universal_Robots_ToolComm_Forwarder_URCap) and uninstall the Robotiq Grippers URCap, which otherwise holds the tool port.
+2. In Installation → General → Tool I/O, set *Controlled by* to *User*, select *Communication Interface* with 115200 baud, no parity, one stop bit, and set the tool output voltage to 24 V.
+3. On the computer, forward the port and pass `/tmp/ttyUR` as the serial port:
+
+   ```sh
+   socat pty,link=/tmp/ttyUR,raw,ignoreeof,waitslave tcp:<robot-ip>:54321
+   ```
+
+The first status read may time out once while socat connects; the SDK retries it.
+
 ## CMake options
 
 [`sdk_cpp/CMakeLists.txt`](../sdk_cpp/CMakeLists.txt) exposes the
