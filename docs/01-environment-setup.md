@@ -312,6 +312,10 @@ A gripper wired to a Universal Robots tool connector is driven from your compute
 
 The first status read may time out once while socat connects; the SDK retries it.
 
+---
+
+**Next:** [Quick start →](02-quick-start.md)
+
 ## CMake options
 
 [`sdk_cpp/CMakeLists.txt`](../sdk_cpp/CMakeLists.txt) exposes the
@@ -319,7 +323,7 @@ The first status read may time out once while socat connects; the SDK retries it
 adjust them when you're consuming the SDK differently: as a dependency
 that shouldn't build its own examples/tests, or on a target that
 doesn't have a hosted C++ runtime (see
-[Embedded / bare-metal builds](05-embedded-builds.md) for that case
+[Embedded / bare-metal builds](06-embedded-builds.md) for that case
 in detail).
 
 | Option | Default | What it controls |
