@@ -12,6 +12,6 @@ This repository no longer changes.
 ## Moving to robotiq-sdk
 
 - **Docs:** [grippers/README.md](https://github.com/robotiq/robotiq-sdk/blob/main/grippers/README.md) and [grippers/docs/](https://github.com/robotiq/robotiq-sdk/tree/main/grippers/docs).
-- **As a submodule:** `git submodule add https://github.com/robotiq/robotiq-sdk third_party/robotiq-sdk`, then `add_subdirectory(third_party/robotiq-sdk/grippers/sdk_cpp)`.
-- **Versions:** robotiq-sdk has one version for every SDK, starting at 3.0.0. The grippers CMake package keeps `SameMajorVersion`, so update `find_package(grippers 1)` to `find_package(grippers 3)`.
+- **As a submodule:** `git submodule add https://github.com/robotiq/robotiq-sdk third_party/robotiq-sdk`, pin a release with `git -C third_party/robotiq-sdk checkout v3.0.0`, then `add_subdirectory(third_party/robotiq-sdk/grippers/sdk_cpp)`.
+- **Versions:** robotiq-sdk has one version for every SDK, starting at 3.0.0. The grippers code in 3.0.0 is the same as in 1.3.0, with no API change. The CMake package keeps `SameMajorVersion`, so only `find_package(grippers 1)` becomes `find_package(grippers 3)`.
 - **Issues and feature requests:** open them in [robotiq/robotiq-sdk](https://github.com/robotiq/robotiq-sdk/issues).
